@@ -29,7 +29,7 @@ const MAX_HISTORY = 50
 
 const SITES_STEP = 50
 const SITES_MIN = 50
-const SITES_MAX = 4000
+const SITES_MAX = 10000
 const PHI = 1.618033988749895  // Golden ratio
 
 export function ImageVoronoi() {
@@ -437,7 +437,7 @@ export function ImageVoronoi() {
             type="range"
             value={numSites}
             min="50"
-            max="4000"
+            max={SITES_MAX}
             step="50"
             onChange={handleNumSitesChange}
           />

@@ -1,4 +1,4 @@
-import Voronoi, { Diagram, Vertex } from 'voronoi'
+import Voronoi, { Diagram } from 'voronoi'
 import { ChoosePoint, Position } from './ChoosePoints'
 import Sobel from 'sobel'
 import { createSeededRandom, randomSeed } from '../utils/random'
@@ -6,6 +6,11 @@ import { createSeededRandom, randomSeed } from '../utils/random'
 type RGB = [number, number, number]
 
 export type { Position }
+
+// 4-connected neighbors (dx, dy)
+const NEIGHBORS = [
+  [-1, 0], [1, 0], [0, -1], [0, 1],
+] as const
 
 export class VoronoiDrawer {
   private canvas: HTMLCanvasElement
@@ -54,9 +59,11 @@ export class VoronoiDrawer {
     return cp.pickPosition(random)
   }
 
-  private computeVoronoi(sites?: Position[], seed?: number): void {
+  private computeSites(sites?: Position[], seed?: number): void {
     this.sites = (sites && sites.length > 0) ? sites : this.generateSites(seed)
+  }
 
+  private computeVoronoi(): void {
     const bbox = {
       xl: 0,
       xr: this.width,
@@ -68,96 +75,137 @@ export class VoronoiDrawer {
     this.diagram = voronoi.compute(this.sites, bbox)
   }
 
-  private isPointInPoly(poly: Vertex[], x: number, y: number): boolean {
-    let c = false
-    for (let k = 0, m = poly.length - 1; k < poly.length; m = k++) {
-      if (
-        ((poly[k].y <= y && y < poly[m].y) || (poly[m].y <= y && y < poly[k].y)) &&
-        x < ((poly[m].x - poly[k].x) * (y - poly[k].y)) / (poly[m].y - poly[k].y) + poly[k].x
-      ) {
-        c = !c
+  /**
+   * Compute cell colors using multi-source BFS flood fill.
+   * O(pixels) instead of O(cells × pixels_per_cell × polygon_vertices)
+   */
+  private cellColorsFloodFill(imgdata: Uint8ClampedArray): RGB[] {
+    const { width, height, sites } = this
+    const numPixels = width * height
+    const numSites = sites.length
+
+    // Cell membership for each pixel (-1 = unvisited)
+    const cellOf = new Int32Array(numPixels).fill(-1)
+
+    // Color accumulators per cell
+    const rSum = new Float64Array(numSites)
+    const gSum = new Float64Array(numSites)
+    const bSum = new Float64Array(numSites)
+    const counts = new Uint32Array(numSites)
+
+    // BFS queue: store pixel indices
+    // Use a circular buffer for efficiency
+    const queue = new Int32Array(numPixels)
+    let qHead = 0
+    let qTail = 0
+
+    // Initialize: seed pixels
+    for (let i = 0; i < numSites; i++) {
+      const x = Math.floor(sites[i].x)
+      const y = Math.floor(sites[i].y)
+      if (x >= 0 && x < width && y >= 0 && y < height) {
+        const idx = y * width + x
+        if (cellOf[idx] === -1) {
+          cellOf[idx] = i
+          queue[qTail++] = idx
+
+          // Accumulate color
+          const px = idx * 4
+          rSum[i] += imgdata[px]
+          gSum[i] += imgdata[px + 1]
+          bSum[i] += imgdata[px + 2]
+          counts[i]++
+        }
       }
     }
-    return c
-  }
 
-  private cellColors(imgdata: Uint8ClampedArray): RGB[] {
-    if (!this.diagram) return []
+    // BFS
+    while (qHead < qTail) {
+      const idx = queue[qHead++]
+      const cell = cellOf[idx]
+      const x = idx % width
+      const y = (idx - x) / width
 
-    const cellColors: RGB[] = []
+      for (const [dx, dy] of NEIGHBORS) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          const nidx = ny * width + nx
+          if (cellOf[nidx] === -1) {
+            cellOf[nidx] = cell
+            queue[qTail++] = nidx
 
-    for (let i = 0; i < this.diagram.cells.length; i++) {
-      const boundaries: Vertex[] = []
-      let minX = this.width
-      let minY = this.height
-      let maxX = 0
-      let maxY = 0
-
-      const edges = this.diagram.cells[i].halfedges
-      for (let j = 0; j < edges.length; j++) {
-        const va = edges[j].getStartpoint()
-        boundaries.push(va)
-        minX = Math.min(va.x, minX)
-        maxX = Math.max(va.x, maxX)
-        minY = Math.min(va.y, minY)
-        maxY = Math.max(va.y, maxY)
-      }
-
-      let r = 0
-      let g = 0
-      let b = 0
-      let count = 0
-      let inside = false
-
-      for (let k = Math.max(Math.floor(minX), 0); k < Math.min(Math.floor(maxX + 1), this.width); k++) {
-        for (let j = Math.max(Math.floor(minY), 0); j < Math.min(Math.floor(maxY + 1), this.height); j++) {
-          if (this.isPointInPoly(boundaries, k, j)) {
-            const ind = j * this.width + k
-            r += imgdata[ind * 4]
-            g += imgdata[ind * 4 + 1]
-            b += imgdata[ind * 4 + 2]
-            count += 1
-            inside = true
-          } else if (inside) {
-            inside = false
-            break
+            // Accumulate color
+            const px = nidx * 4
+            rSum[cell] += imgdata[px]
+            gSum[cell] += imgdata[px + 1]
+            bSum[cell] += imgdata[px + 2]
+            counts[cell]++
           }
         }
       }
+    }
 
+    // Compute average colors
+    const cellColors: RGB[] = new Array(numSites)
+    for (let i = 0; i < numSites; i++) {
+      const count = counts[i]
       if (count > 0) {
-        r /= count
-        g /= count
-        b /= count
+        cellColors[i] = [
+          Math.floor(rSum[i] / count),
+          Math.floor(gSum[i] / count),
+          Math.floor(bSum[i] / count),
+        ]
+      } else {
+        cellColors[i] = [0, 0, 0]
       }
-
-      cellColors.push([Math.floor(r), Math.floor(g), Math.floor(b)])
     }
 
     return cellColors
   }
 
   fillVoronoi(sites?: Position[], seed?: number): void {
-    this.computeVoronoi(sites, seed)
+    this.computeSites(sites, seed)
+    if (this.sites.length === 0) return
+
+    // Compute Voronoi diagram for polygon rendering
+    this.computeVoronoi()
     if (!this.diagram) return
 
     const ctx = this.canvas.getContext('2d')
     if (!ctx) return
 
     const imgdata = ctx.getImageData(0, 0, this.width, this.height).data
-    const cellcolor = this.cellColors(imgdata)
+
+    // Use flood fill for O(pixels) color computation
+    const cellColors = this.cellColorsFloodFill(imgdata)
+
+    // Build site coordinate -> index map for O(1) lookup
+    const siteIndexMap = new Map<string, number>()
+    for (let i = 0; i < this.sites.length; i++) {
+      siteIndexMap.set(`${this.sites[i].x},${this.sites[i].y}`, i)
+    }
 
     ctx.clearRect(0, 0, this.width, this.height)
 
-    for (let i = 0; i < cellcolor.length; i++) {
-      const [r, g, b] = cellcolor[i]
+    // Render using Voronoi polygon boundaries
+    for (let i = 0; i < this.diagram.cells.length; i++) {
+      const cell = this.diagram.cells[i]
+      const siteKey = `${cell.site.x},${cell.site.y}`
+      const siteIndex = siteIndexMap.get(siteKey)
+      if (siteIndex === undefined || !cellColors[siteIndex]) continue
+
+      const [r, g, b] = cellColors[siteIndex]
       ctx.beginPath()
 
-      let va = this.diagram.cells[i].halfedges[0].getStartpoint()
+      const edges = cell.halfedges
+      if (edges.length === 0) continue
+
+      let va = edges[0].getStartpoint()
       ctx.moveTo(va.x, va.y)
 
-      for (let j = 1; j < this.diagram.cells[i].halfedges.length; j++) {
-        va = this.diagram.cells[i].halfedges[j].getStartpoint()
+      for (let j = 1; j < edges.length; j++) {
+        va = edges[j].getStartpoint()
         ctx.lineTo(va.x, va.y)
       }
 
