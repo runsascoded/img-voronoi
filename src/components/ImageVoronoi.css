@@ -125,6 +125,12 @@
   border-color: #5ab;
 }
 
+.fps-label {
+  font-family: monospace;
+  color: #5ab;
+  font-size: 14px;
+}
+
 
 
 .checkbox {

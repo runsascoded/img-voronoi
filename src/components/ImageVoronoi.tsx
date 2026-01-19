@@ -39,6 +39,17 @@ export function ImageVoronoi() {
   const seedInputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
 
+  // Animation state
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [fps, setFps] = useState(0)
+  const [usePixelRendering, setUsePixelRendering] = useState(true)
+  const animationFrameRef = useRef<number | null>(null)
+  const originalImgDataRef = useRef<ImageData | null>(null)
+  const animatedSitesRef = useRef<Position[]>([])
+  const velocitiesRef = useRef<Position[]>([])
+  const frameCountRef = useRef(0)
+  const fpsUpdateTimeRef = useRef(0)
+
   // Undo/redo history
   const historyRef = useRef<HistoryEntry[]>([])
   const historyIndexRef = useRef(-1)
@@ -331,6 +342,112 @@ export function ImageVoronoi() {
     })
   }
 
+  // Animation functions
+  const initializeAnimation = useCallback(() => {
+    const canvas = canvasRef.current
+    const img = imgRef.current
+    if (!canvas || !img) return
+
+    // Store original image data for re-rendering each frame
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.drawImage(img, 0, 0)
+    originalImgDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height)
+
+    // Initialize sites with random velocities
+    animatedSitesRef.current = sites.map(s => ({ ...s }))
+    velocitiesRef.current = sites.map(() => ({
+      x: (Math.random() - 0.5) * 2,
+      y: (Math.random() - 0.5) * 2,
+    }))
+  }, [sites])
+
+  const animationStep = useCallback(() => {
+    const canvas = canvasRef.current
+    const drawer = voronoiRef.current
+    const originalImgData = originalImgDataRef.current
+    if (!canvas || !drawer || !originalImgData) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const { width, height } = canvas
+    const animatedSites = animatedSitesRef.current
+    const velocities = velocitiesRef.current
+
+    // Move sites
+    for (let i = 0; i < animatedSites.length; i++) {
+      animatedSites[i].x += velocities[i].x
+      animatedSites[i].y += velocities[i].y
+
+      // Bounce off edges
+      if (animatedSites[i].x < 0 || animatedSites[i].x >= width) {
+        velocities[i].x *= -1
+        animatedSites[i].x = Math.max(0, Math.min(width - 1, animatedSites[i].x))
+      }
+      if (animatedSites[i].y < 0 || animatedSites[i].y >= height) {
+        velocities[i].y *= -1
+        animatedSites[i].y = Math.max(0, Math.min(height - 1, animatedSites[i].y))
+      }
+    }
+
+    // Restore original image
+    ctx.putImageData(originalImgData, 0, 0)
+
+    // Re-render Voronoi
+    if (usePixelRendering) {
+      drawer.fillVoronoiPixels(animatedSites)
+    } else {
+      drawer.fillVoronoi(animatedSites)
+    }
+
+    // Update FPS
+    frameCountRef.current++
+    const now = performance.now()
+    if (now - fpsUpdateTimeRef.current >= 1000) {
+      setFps(Math.round(frameCountRef.current * 1000 / (now - fpsUpdateTimeRef.current)))
+      frameCountRef.current = 0
+      fpsUpdateTimeRef.current = now
+    }
+  }, [usePixelRendering])
+
+  const animate = useCallback(() => {
+    animationStep()
+    animationFrameRef.current = requestAnimationFrame(animate)
+  }, [animationStep])
+
+  const togglePlay = useCallback(() => {
+    if (isPlaying) {
+      // Stop
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+      setIsPlaying(false)
+      setFps(0)
+    } else {
+      // Start
+      initializeAnimation()
+      fpsUpdateTimeRef.current = performance.now()
+      frameCountRef.current = 0
+      setIsPlaying(true)
+      animationFrameRef.current = requestAnimationFrame(animate)
+    }
+  }, [isPlaying, initializeAnimation, animate])
+
+  const toggleRenderMode = useCallback(() => {
+    setUsePixelRendering(prev => !prev)
+  }, [])
+
+  // Cleanup animation on unmount
+  useEffect(() => {
+    return () => {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+    }
+  }, [])
+
   // Keyboard shortcuts
   useAction('voronoi:undo', {
     label: 'Undo',
@@ -358,6 +475,20 @@ export function ImageVoronoi() {
     group: 'Voronoi',
     defaultBindings: ['i'],
     handler: toggleInversePP,
+  })
+
+  useAction('voronoi:toggle-play', {
+    label: 'Play/Pause animation',
+    group: 'Voronoi',
+    defaultBindings: ['space'],
+    handler: togglePlay,
+  })
+
+  useAction('voronoi:toggle-render-mode', {
+    label: 'Toggle pixel/polygon rendering',
+    group: 'Voronoi',
+    defaultBindings: ['p'],
+    handler: toggleRenderMode,
   })
 
   useAction('voronoi:increase-sites', {
@@ -472,6 +603,30 @@ export function ImageVoronoi() {
             Download Image
           </button>
         </div>
+
+        <div className="control-wrapper">
+          <button className="output-button" onClick={togglePlay}>
+            {isPlaying ? 'Pause' : 'Play'}
+          </button>
+        </div>
+
+        <div className="control-wrapper">
+          <label className="selection-label">
+            <input
+              className="control-input checkbox"
+              type="checkbox"
+              checked={usePixelRendering}
+              onChange={toggleRenderMode}
+            />
+            {' '}Pixel Mode
+          </label>
+        </div>
+
+        {isPlaying && (
+          <div className="control-wrapper">
+            <label className="control-label fps-label">{fps} FPS</label>
+          </div>
+        )}
       </div>
 
       <div className="canvas-wrapper">

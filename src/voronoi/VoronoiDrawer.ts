@@ -12,6 +12,11 @@ const NEIGHBORS = [
   [-1, 0], [1, 0], [0, -1], [0, 1],
 ] as const
 
+export interface RenderOptions {
+  usePolygons?: boolean  // Use Canvas paths (slower but smoother edges)
+  drawEdges?: boolean    // Draw cell boundaries
+}
+
 export class VoronoiDrawer {
   private canvas: HTMLCanvasElement
   private width: number
@@ -164,6 +169,127 @@ export class VoronoiDrawer {
     return cellColors
   }
 
+  /**
+   * Fast pixel-based rendering using flood fill only.
+   * Skips Voronoi polygon computation for maximum performance.
+   * Returns the cell membership array for edge detection if needed.
+   */
+  fillVoronoiPixels(sites?: Position[], seed?: number): Int32Array | null {
+    this.computeSites(sites, seed)
+    if (this.sites.length === 0) return null
+
+    const ctx = this.canvas.getContext('2d')
+    if (!ctx) return null
+
+    const imgdata = ctx.getImageData(0, 0, this.width, this.height)
+    const pixels = imgdata.data
+
+    // Compute cell membership and colors via flood fill
+    const { cellOf, cellColors } = this.floodFillWithMembership(pixels)
+
+    // Write pixels directly
+    const numPixels = this.width * this.height
+    for (let i = 0; i < numPixels; i++) {
+      const cell = cellOf[i]
+      if (cell >= 0 && cellColors[cell]) {
+        const [r, g, b] = cellColors[cell]
+        const px = i * 4
+        pixels[px] = r
+        pixels[px + 1] = g
+        pixels[px + 2] = b
+        // alpha stays the same
+      }
+    }
+
+    ctx.putImageData(imgdata, 0, 0)
+    return cellOf
+  }
+
+  /**
+   * Flood fill that returns both cell membership and colors.
+   */
+  private floodFillWithMembership(imgdata: Uint8ClampedArray): {
+    cellOf: Int32Array
+    cellColors: RGB[]
+  } {
+    const { width, height, sites } = this
+    const numPixels = width * height
+    const numSites = sites.length
+
+    const cellOf = new Int32Array(numPixels).fill(-1)
+    const rSum = new Float64Array(numSites)
+    const gSum = new Float64Array(numSites)
+    const bSum = new Float64Array(numSites)
+    const counts = new Uint32Array(numSites)
+
+    const queue = new Int32Array(numPixels)
+    let qHead = 0
+    let qTail = 0
+
+    // Initialize with seed pixels
+    for (let i = 0; i < numSites; i++) {
+      const x = Math.floor(sites[i].x)
+      const y = Math.floor(sites[i].y)
+      if (x >= 0 && x < width && y >= 0 && y < height) {
+        const idx = y * width + x
+        if (cellOf[idx] === -1) {
+          cellOf[idx] = i
+          queue[qTail++] = idx
+          const px = idx * 4
+          rSum[i] += imgdata[px]
+          gSum[i] += imgdata[px + 1]
+          bSum[i] += imgdata[px + 2]
+          counts[i]++
+        }
+      }
+    }
+
+    // BFS
+    while (qHead < qTail) {
+      const idx = queue[qHead++]
+      const cell = cellOf[idx]
+      const x = idx % width
+      const y = (idx - x) / width
+
+      for (const [dx, dy] of NEIGHBORS) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          const nidx = ny * width + nx
+          if (cellOf[nidx] === -1) {
+            cellOf[nidx] = cell
+            queue[qTail++] = nidx
+            const px = nidx * 4
+            rSum[cell] += imgdata[px]
+            gSum[cell] += imgdata[px + 1]
+            bSum[cell] += imgdata[px + 2]
+            counts[cell]++
+          }
+        }
+      }
+    }
+
+    // Compute average colors
+    const cellColors: RGB[] = new Array(numSites)
+    for (let i = 0; i < numSites; i++) {
+      const count = counts[i]
+      if (count > 0) {
+        cellColors[i] = [
+          Math.floor(rSum[i] / count),
+          Math.floor(gSum[i] / count),
+          Math.floor(bSum[i] / count),
+        ]
+      } else {
+        cellColors[i] = [0, 0, 0]
+      }
+    }
+
+    return { cellOf, cellColors }
+  }
+
+  /**
+   * Original polygon-based rendering (slower but smoother edges).
+   */
   fillVoronoi(sites?: Position[], seed?: number): void {
     this.computeSites(sites, seed)
     if (this.sites.length === 0) return
@@ -216,5 +342,24 @@ export class VoronoiDrawer {
       ctx.stroke()
       ctx.fill()
     }
+  }
+
+  /**
+   * Generate uniformly distributed random sites (no edge weighting).
+   * Much faster than edge-weighted sampling for animation.
+   */
+  generateUniformSites(count: number, seed?: number): Position[] {
+    this.currentSeed = seed ?? randomSeed()
+    const random = createSeededRandom(this.currentSeed)
+
+    const sites: Position[] = []
+    for (let i = 0; i < count; i++) {
+      sites.push({
+        x: random() * this.width,
+        y: random() * this.height,
+      })
+    }
+    this.sites = sites
+    return sites
   }
 }
