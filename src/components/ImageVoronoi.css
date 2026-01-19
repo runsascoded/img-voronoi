@@ -1,6 +1,22 @@
 .IV {
   background-color: #0f2031;
   min-height: 100vh;
+  position: relative;
+}
+
+.IV.dragging::after {
+  content: 'Drop image here';
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 32, 49, 0.9);
+  border: 4px dashed #5ab;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  color: #bbebd8;
+  z-index: 100;
+  pointer-events: none;
 }
 
 .nav-wrapper {

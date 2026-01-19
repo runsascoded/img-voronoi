@@ -1,7 +1,7 @@
 import Voronoi, { Diagram, Vertex } from 'voronoi'
 import { ChoosePoint, Position } from './ChoosePoints'
 import Sobel from 'sobel'
-import { createSeededRandom, deriveSeed, randomSeed } from '../utils/random'
+import { createSeededRandom, randomSeed } from '../utils/random'
 
 type RGB = [number, number, number]
 
@@ -81,7 +81,7 @@ export class VoronoiDrawer {
     return c
   }
 
-  private cellColors(imgdata: Uint8ClampedArray, channel: number, rgbAmount: number): RGB[] {
+  private cellColors(imgdata: Uint8ClampedArray): RGB[] {
     if (!this.diagram) return []
 
     const cellColors: RGB[] = []
@@ -125,57 +125,29 @@ export class VoronoiDrawer {
         }
       }
 
-      r /= count
-      g /= count
-      b /= count
-
-      if (channel === 0) {
-        cellColors.push([Math.floor(r), Math.floor(g), Math.floor(b)])
-      } else if (channel === 1) {
-        cellColors.push([
-          Math.floor((r * rgbAmount) / 100),
-          Math.floor((g * (1 - rgbAmount / 100)) / 2),
-          Math.floor((b * (1 - rgbAmount / 100)) / 2),
-        ])
-      } else if (channel === 2) {
-        cellColors.push([
-          Math.floor((r * (1 - rgbAmount / 100)) / 2),
-          Math.floor((g * rgbAmount) / 100),
-          Math.floor((b * (1 - rgbAmount / 100)) / 2),
-        ])
-      } else {
-        cellColors.push([
-          Math.floor((r * (1 - rgbAmount / 100)) / 2),
-          Math.floor((g * (1 - rgbAmount / 100)) / 2),
-          Math.floor((b * rgbAmount) / 100),
-        ])
+      if (count > 0) {
+        r /= count
+        g /= count
+        b /= count
       }
+
+      cellColors.push([Math.floor(r), Math.floor(g), Math.floor(b)])
     }
 
     return cellColors
   }
 
-  fillVoronoi(
-    channel: number,
-    clear = true,
-    imgdata?: Uint8ClampedArray,
-    ifStroke = true,
-    rgbAmount = 0,
-    sites?: Position[],
-    seed?: number,
-  ): void {
+  fillVoronoi(sites?: Position[], seed?: number): void {
     this.computeVoronoi(sites, seed)
     if (!this.diagram) return
 
     const ctx = this.canvas.getContext('2d')
     if (!ctx) return
 
-    const data = imgdata ?? ctx.getImageData(0, 0, this.width, this.height).data
-    const cellcolor = this.cellColors(data, channel, rgbAmount)
+    const imgdata = ctx.getImageData(0, 0, this.width, this.height).data
+    const cellcolor = this.cellColors(imgdata)
 
-    if (clear) {
-      ctx.clearRect(0, 0, this.width, this.height)
-    }
+    ctx.clearRect(0, 0, this.width, this.height)
 
     for (let i = 0; i < cellcolor.length; i++) {
       const [r, g, b] = cellcolor[i]
@@ -190,34 +162,11 @@ export class VoronoiDrawer {
       }
 
       ctx.closePath()
-      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
-
-      if (ifStroke) {
-        ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`
-        ctx.stroke()
-      }
-
+      const color = `rgb(${r}, ${g}, ${b})`
+      ctx.fillStyle = color
+      ctx.strokeStyle = color
+      ctx.stroke()
       ctx.fill()
     }
-  }
-
-  rgbVoronoi(rgbAmount: number, seed?: number): void {
-    const ctx = this.canvas.getContext('2d')
-    if (!ctx) return
-
-    // Use provided seed or generate a new one
-    const baseSeed = seed ?? randomSeed()
-    this.currentSeed = baseSeed
-
-    ctx.globalCompositeOperation = 'lighter'
-    const imgdata = ctx.getImageData(0, 0, this.width, this.height).data
-
-    // Each channel gets a different seed derived from the base seed
-    // This creates the chromatic aberration effect while being reproducible
-    this.fillVoronoi(1, true, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 0))
-    this.fillVoronoi(2, false, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 1))
-    this.fillVoronoi(3, false, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 2))
-
-    ctx.globalCompositeOperation = 'source-over'
   }
 }

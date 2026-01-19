@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, ChangeEvent } from 'react'
+import { useRef, useEffect, useCallback, ChangeEvent, DragEvent, useState } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
 import { useUrlParams, intParam, boolParam } from 'use-prms/hash'
 import { useAction } from 'use-kbd'
@@ -12,10 +12,20 @@ interface ImageState {
   sites: Position[]
 }
 
+interface HistoryEntry {
+  imageDataUrl: string | null
+  sites: Position[]
+  seed: number
+  numSites: number
+  inversePP: boolean
+}
+
 const DEFAULT_IMAGE_STATE: ImageState = {
   imageDataUrl: null,
   sites: [],
 }
+
+const MAX_HISTORY = 50
 
 const SITES_STEP = 50
 const SITES_MIN = 50
@@ -27,21 +37,23 @@ export function ImageVoronoi() {
   const voronoiRef = useRef<VoronoiDrawer | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const seedInputRef = useRef<HTMLInputElement>(null)
+  const [isDragging, setIsDragging] = useState(false)
+
+  // Undo/redo history
+  const historyRef = useRef<HistoryEntry[]>([])
+  const historyIndexRef = useRef(-1)
+  const isRestoringRef = useRef(false)
 
   // URL params for shareable settings
   const { values, setValues } = useUrlParams({
     s: intParam(0),        // seed (default 0, omitted from URL)
     n: intParam(400),      // numSites
-    h: boolParam,          // ifRGB (Get High)
     i: boolParam,          // inversePP
-    d: intParam(0),        // dosage
   })
 
   const seed = values.s
   const numSites = values.n
-  const ifRGB = values.h
   const inversePP = values.i
-  const dosage = values.d
 
   // Session storage for large data (image + sites)
   const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
@@ -49,18 +61,79 @@ export function ImageVoronoi() {
   })
   const { imageDataUrl, sites } = imageState
 
+  // Push current state to history
+  const pushHistory = useCallback((entry: HistoryEntry) => {
+    if (isRestoringRef.current) return
+
+    const history = historyRef.current
+    const index = historyIndexRef.current
+
+    // Remove any future history if we're not at the end
+    if (index < history.length - 1) {
+      history.splice(index + 1)
+    }
+
+    // Add new entry
+    history.push(entry)
+
+    // Trim old entries if we exceed max
+    if (history.length > MAX_HISTORY) {
+      history.shift()
+    } else {
+      historyIndexRef.current = history.length - 1
+    }
+  }, [])
+
+  // Restore a history entry
+  const restoreEntry = useCallback((entry: HistoryEntry) => {
+    isRestoringRef.current = true
+
+    // Load image and redraw
+    const image = new Image()
+    image.src = entry.imageDataUrl || sampleImage
+    image.onload = () => {
+      imgRef.current = image
+
+      const canvas = canvasRef.current
+      if (!canvas) return
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      canvas.height = image.height
+      canvas.width = image.width
+      ctx.drawImage(image, 0, 0)
+
+      voronoiRef.current = new VoronoiDrawer(canvas, entry.numSites, entry.inversePP)
+      voronoiRef.current.fillVoronoi(entry.sites, entry.seed)
+
+      setValues({ s: entry.seed, n: entry.numSites, i: entry.inversePP })
+      setImageState({ imageDataUrl: entry.imageDataUrl, sites: entry.sites })
+
+      isRestoringRef.current = false
+    }
+  }, [setValues, setImageState])
+
+  const undo = useCallback(() => {
+    if (historyIndexRef.current > 0) {
+      historyIndexRef.current--
+      restoreEntry(historyRef.current[historyIndexRef.current])
+    }
+  }, [restoreEntry])
+
+  const redo = useCallback(() => {
+    if (historyIndexRef.current < historyRef.current.length - 1) {
+      historyIndexRef.current++
+      restoreEntry(historyRef.current[historyIndexRef.current])
+    }
+  }, [restoreEntry])
+
   const drawVoronoi = useCallback((
     drawer: VoronoiDrawer,
-    isRGB: boolean,
-    dosageVal: number,
     seedVal: number,
     existingSites?: Position[],
   ): Position[] => {
-    if (isRGB) {
-      drawer.rgbVoronoi(dosageVal, seedVal)
-    } else {
-      drawer.fillVoronoi(0, true, undefined, true, 0, existingSites, seedVal)
-    }
+    drawer.fillVoronoi(existingSites, seedVal)
     return drawer.getSites()
   }, [])
 
@@ -68,9 +141,7 @@ export function ImageVoronoi() {
     image: HTMLImageElement,
     fileChanged: boolean,
     sitesCount: number,
-    isRGB: boolean,
     inversePPVal: boolean,
-    dosageVal: number,
     seedVal: number,
     existingSites?: Position[],
   ): Position[] => {
@@ -88,42 +159,43 @@ export function ImageVoronoi() {
       voronoiRef.current = new VoronoiDrawer(canvas, sitesCount, inversePPVal)
     }
 
-    return drawVoronoi(voronoiRef.current, isRGB, dosageVal, seedVal, existingSites)
+    return drawVoronoi(voronoiRef.current, seedVal, existingSites)
   }, [drawVoronoi])
 
   // Load image and render on mount
   useEffect(() => {
-    const loadAndDraw = (src: string, seedVal: number, existingSites?: Position[]) => {
+    const loadAndDraw = (src: string | null, seedVal: number, existingSites?: Position[]) => {
       const image = new Image()
-      image.src = src
+      image.src = src || sampleImage
       image.onload = () => {
         imgRef.current = image
-        const newSites = drawImg(
-          image,
-          true,
-          numSites,
-          ifRGB,
-          inversePP,
-          dosage,
-          seedVal,
-          existingSites,
-        )
-        if (!ifRGB && (!existingSites || existingSites.length === 0)) {
+        const newSites = drawImg(image, true, numSites, inversePP, seedVal, existingSites)
+        const finalSites = existingSites && existingSites.length > 0 ? existingSites : newSites
+        if (!existingSites || existingSites.length === 0) {
           setImageState(prev => ({ ...prev, sites: newSites }))
+        }
+        // Initialize history with current state
+        if (historyRef.current.length === 0) {
+          pushHistory({
+            imageDataUrl: src,
+            sites: finalSites,
+            seed: seedVal,
+            numSites,
+            inversePP,
+          })
         }
       }
     }
 
     if (imageDataUrl) {
-      loadAndDraw(imageDataUrl, seed, !ifRGB && sites.length > 0 ? sites : undefined)
+      loadAndDraw(imageDataUrl, seed, sites.length > 0 ? sites : undefined)
     } else {
-      loadAndDraw(sampleImage, seed)
+      loadAndDraw(null, seed)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
+  const loadImageFromFile = useCallback((file: File) => {
+    if (!file.type.startsWith('image/')) return
 
     const reader = new FileReader()
     reader.onload = (event) => {
@@ -132,37 +204,79 @@ export function ImageVoronoi() {
       image.src = dataUrl
       image.onload = () => {
         imgRef.current = image
-        const newSites = drawImg(image, true, numSites, ifRGB, inversePP, dosage, seed)
-        setImageState({ imageDataUrl: dataUrl, sites: ifRGB ? [] : newSites })
+        const newSites = drawImg(image, true, numSites, inversePP, seed)
+        setImageState({ imageDataUrl: dataUrl, sites: newSites })
+        pushHistory({ imageDataUrl: dataUrl, sites: newSites, seed, numSites, inversePP })
       }
     }
-    reader.readAsDataURL(files[0])
+    reader.readAsDataURL(file)
+  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory])
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+    loadImageFromFile(files[0])
   }
+
+  // Drag & drop handlers
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+  }
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+
+    const files = e.dataTransfer.files
+    if (files.length > 0) {
+      loadImageFromFile(files[0])
+    }
+  }
+
+  // Paste from clipboard
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) {
+            loadImageFromFile(file)
+            break
+          }
+        }
+      }
+    }
+
+    document.addEventListener('paste', handlePaste)
+    return () => document.removeEventListener('paste', handlePaste)
+  }, [loadImageFromFile])
 
   const handleNumSitesChange = (e: ChangeEvent<HTMLInputElement>) => {
     const newNumSites = parseInt(e.target.value, 10)
     updateNumSites(newNumSites)
   }
 
-  const updateNumSites = (newNumSites: number) => {
+  const updateNumSites = (newNumSites: number, recordHistory = true) => {
     if (imgRef.current && voronoiRef.current) {
       voronoiRef.current.numSites = newNumSites
-      const newSites = drawImg(imgRef.current, false, newNumSites, ifRGB, inversePP, dosage, seed)
+      const newSites = drawImg(imgRef.current, false, newNumSites, inversePP, seed)
       setValues({ n: newNumSites })
-      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
-    }
-  }
-
-  const handleRGBChange = () => {
-    toggleRGB()
-  }
-
-  const toggleRGB = () => {
-    const newIfRGB = !ifRGB
-    if (imgRef.current) {
-      const newSites = drawImg(imgRef.current, false, numSites, newIfRGB, inversePP, dosage, seed, newIfRGB ? undefined : sites)
-      setValues({ h: newIfRGB })
-      setImageState(prev => ({ ...prev, sites: newIfRGB ? [] : newSites }))
+      setImageState(prev => ({ ...prev, sites: newSites }))
+      if (recordHistory) {
+        pushHistory({ imageDataUrl, sites: newSites, seed, numSites: newNumSites, inversePP })
+      }
     }
   }
 
@@ -173,18 +287,11 @@ export function ImageVoronoi() {
   const toggleInversePP = () => {
     const newInversePP = !inversePP
     if (imgRef.current) {
-      const newSites = drawImg(imgRef.current, true, numSites, ifRGB, newInversePP, dosage, seed)
+      const newSites = drawImg(imgRef.current, true, numSites, newInversePP, seed)
       setValues({ i: newInversePP })
-      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
+      setImageState(prev => ({ ...prev, sites: newSites }))
+      pushHistory({ imageDataUrl, sites: newSites, seed, numSites, inversePP: newInversePP })
     }
-  }
-
-  const handleDosageChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const newDosage = parseInt(e.target.value, 10)
-    if (ifRGB && imgRef.current) {
-      drawImg(imgRef.current, false, numSites, ifRGB, inversePP, newDosage, seed)
-    }
-    setValues({ d: newDosage })
   }
 
   const handleSeedChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -193,11 +300,14 @@ export function ImageVoronoi() {
     updateSeed(newSeed)
   }
 
-  const updateSeed = (newSeed: number) => {
+  const updateSeed = (newSeed: number, recordHistory = true) => {
     if (imgRef.current) {
-      const newSites = drawImg(imgRef.current, false, numSites, ifRGB, inversePP, dosage, newSeed)
+      const newSites = drawImg(imgRef.current, false, numSites, inversePP, newSeed)
       setValues({ s: newSeed })
-      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
+      setImageState(prev => ({ ...prev, sites: newSites }))
+      if (recordHistory) {
+        pushHistory({ imageDataUrl, sites: newSites, seed: newSeed, numSites, inversePP })
+      }
     }
   }
 
@@ -222,18 +332,25 @@ export function ImageVoronoi() {
   }
 
   // Keyboard shortcuts
+  useAction('voronoi:undo', {
+    label: 'Undo',
+    group: 'Voronoi',
+    defaultBindings: ['z', 'meta+z'],
+    handler: undo,
+  })
+
+  useAction('voronoi:redo', {
+    label: 'Redo',
+    group: 'Voronoi',
+    defaultBindings: ['shift+z', 'meta+shift+z'],
+    handler: redo,
+  })
+
   useAction('voronoi:focus-seed', {
     label: 'Focus seed input',
     group: 'Voronoi',
     defaultBindings: ['f'],
     handler: focusSeedInput,
-  })
-
-  useAction('voronoi:toggle-rgb', {
-    label: 'Toggle Get High (RGB)',
-    group: 'Voronoi',
-    defaultBindings: ['h'],
-    handler: toggleRGB,
   })
 
   useAction('voronoi:toggle-inverse', {
@@ -293,7 +410,12 @@ export function ImageVoronoi() {
   })
 
   return (
-    <div className="IV">
+    <div
+      className={`IV${isDragging ? ' dragging' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="nav-wrapper light-bg">
         <div className="control-wrapper">
           <label className="control-label file-label">
@@ -330,31 +452,6 @@ export function ImageVoronoi() {
             min="0"
             value={seed}
             onChange={handleSeedChange}
-          />
-        </div>
-
-        <div className="control-wrapper">
-          <label className="selection-label">
-            <input
-              className="control-input checkbox"
-              type="checkbox"
-              checked={ifRGB}
-              onChange={handleRGBChange}
-            />
-            {' '}Get High
-          </label>
-        </div>
-
-        <div className="control-wrapper">
-          <label className="control-label">Drug dosage</label>
-          <label className="control-input control-number number">{dosage}</label>
-          <input
-            className="control-input control-slider slider"
-            type="range"
-            value={dosage}
-            min="0"
-            max="100"
-            onChange={handleDosageChange}
           />
         </div>
 
