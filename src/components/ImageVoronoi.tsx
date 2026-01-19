@@ -18,6 +18,9 @@ const DEFAULT_IMAGE_STATE: ImageState = {
 }
 
 const SITES_STEP = 50
+const SITES_MIN = 50
+const SITES_MAX = 4000
+const PHI = 1.618033988749895  // Golden ratio
 
 export function ImageVoronoi() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -241,17 +244,45 @@ export function ImageVoronoi() {
   })
 
   useAction('voronoi:increase-sites', {
-    label: 'Increase sites',
+    label: 'Increase sites (+50)',
     group: 'Voronoi',
     defaultBindings: [']', '='],
-    handler: () => updateNumSites(Math.min(4000, numSites + SITES_STEP)),
+    handler: () => updateNumSites(Math.min(SITES_MAX, numSites + SITES_STEP)),
   })
 
   useAction('voronoi:decrease-sites', {
-    label: 'Decrease sites',
+    label: 'Decrease sites (-50)',
     group: 'Voronoi',
     defaultBindings: ['[', '-'],
-    handler: () => updateNumSites(Math.max(50, numSites - SITES_STEP)),
+    handler: () => updateNumSites(Math.max(SITES_MIN, numSites - SITES_STEP)),
+  })
+
+  useAction('voronoi:double-sites', {
+    label: 'Double sites (×2)',
+    group: 'Voronoi',
+    defaultBindings: ['}'],
+    handler: () => updateNumSites(Math.min(SITES_MAX, numSites * 2)),
+  })
+
+  useAction('voronoi:halve-sites', {
+    label: 'Halve sites (÷2)',
+    group: 'Voronoi',
+    defaultBindings: ['{'],
+    handler: () => updateNumSites(Math.max(SITES_MIN, Math.round(numSites / 2))),
+  })
+
+  useAction('voronoi:golden-up', {
+    label: 'Scale sites up (×φ)',
+    group: 'Voronoi',
+    defaultBindings: [')'],
+    handler: () => updateNumSites(Math.min(SITES_MAX, Math.floor(numSites * PHI))),
+  })
+
+  useAction('voronoi:golden-down', {
+    label: 'Scale sites down (÷φ)',
+    group: 'Voronoi',
+    defaultBindings: ['('],
+    handler: () => updateNumSites(Math.max(SITES_MIN, Math.ceil(numSites / PHI))),
   })
 
   useAction('voronoi:download', {
