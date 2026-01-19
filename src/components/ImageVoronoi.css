@@ -1,0 +1,138 @@
+.IV {
+  background-color: #0f2031;
+  min-height: 100vh;
+}
+
+.nav-wrapper {
+  padding-top: 17px;
+  padding-bottom: 17px;
+  text-align: center;
+  padding-left: 2em;
+  padding-right: 2em;
+}
+
+.light-bg {
+  background-color: #0f2031;
+  border-bottom: 1px #3a7982 solid;
+  border-top: 1px #3a7982 solid;
+}
+
+.control-wrapper {
+  display: inline-block;
+  width: 120px;
+  margin-right: 20px;
+  vertical-align: middle;
+}
+
+.control-label {
+  max-width: 90px;
+  float: left;
+  display: block;
+  font-size: 11px;
+  color: #bbebd8;
+}
+
+.file-label {
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+  width: 100%;
+}
+
+.file-label:hover {
+  color: #fff;
+}
+
+.file-input {
+  display: none;
+}
+
+.selection-label {
+  max-width: 90px;
+  float: left;
+  display: block;
+  font-size: 15px;
+  color: #bbebd8;
+  cursor: pointer;
+}
+
+.control-slider {
+  display: block;
+  float: left;
+  border: 0;
+  width: 120px;
+  height: 1px;
+  margin-top: 6px;
+  background: #ddd;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+}
+
+.control-number {
+  display: block;
+  color: #bbebd8;
+  float: right;
+  border: 0;
+  max-width: 40px;
+  font-family: sans-serif;
+  background-color: transparent;
+  font-size: 11px;
+}
+
+.sites-control {
+  width: 140px;
+}
+
+.sites-control .control-slider {
+  width: 140px;
+}
+
+.checkbox {
+  cursor: pointer;
+}
+
+.output-button {
+  background-color: rgb(36, 77, 138);
+  padding: 5px 12px;
+  display: inline-block;
+  color: #c6dad3;
+  font-weight: 400;
+  border-radius: 2px;
+  cursor: pointer;
+  border: 0;
+  font-family: sans-serif;
+  font-size: 12px;
+  text-decoration: none;
+  line-height: normal;
+}
+
+.output-button:hover {
+  background-color: #06f;
+  color: #fff;
+}
+
+.canvas-wrapper {
+  width: 100%;
+  position: relative;
+  line-height: 1.7;
+  padding-top: 3%;
+  padding-bottom: 2%;
+  text-align: center;
+}
+
+.canvas {
+  justify-content: center;
+  align-items: center;
+  max-width: 80%;
+  max-height: 80em;
+}
+
+@media all and (max-width: 860px) {
+  .nav-wrapper {
+    text-align: center;
+  }
+  .control-wrapper {
+    margin-bottom: 10px;
+  }
+}
