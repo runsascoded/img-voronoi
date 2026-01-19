@@ -1,6 +1,7 @@
 import Voronoi, { Diagram, Vertex } from 'voronoi'
 import { ChoosePoint, Position } from './ChoosePoints'
 import Sobel from 'sobel'
+import { createSeededRandom, deriveSeed, randomSeed } from '../utils/random'
 
 type RGB = [number, number, number]
 
@@ -13,6 +14,7 @@ export class VoronoiDrawer {
   private sob: Uint8ClampedArray
   private diagram: Diagram | null = null
   private sites: Position[] = []
+  private currentSeed: number = 0
   public numSites: number
   public inversePP: boolean
 
@@ -34,7 +36,14 @@ export class VoronoiDrawer {
     return this.sites
   }
 
-  private generateSites(): Position[] {
+  getSeed(): number {
+    return this.currentSeed
+  }
+
+  private generateSites(seed?: number): Position[] {
+    this.currentSeed = seed ?? randomSeed()
+    const random = createSeededRandom(this.currentSeed)
+
     const cp = new ChoosePoint(
       this.sob,
       this.canvas.width,
@@ -42,11 +51,11 @@ export class VoronoiDrawer {
       this.numSites,
       this.inversePP,
     )
-    return cp.pickPosition()
+    return cp.pickPosition(random)
   }
 
-  private computeVoronoi(sites?: Position[]): void {
-    this.sites = sites ?? this.generateSites()
+  private computeVoronoi(sites?: Position[], seed?: number): void {
+    this.sites = (sites && sites.length > 0) ? sites : this.generateSites(seed)
 
     const bbox = {
       xl: 0,
@@ -153,8 +162,9 @@ export class VoronoiDrawer {
     ifStroke = true,
     rgbAmount = 0,
     sites?: Position[],
+    seed?: number,
   ): void {
-    this.computeVoronoi(sites)
+    this.computeVoronoi(sites, seed)
     if (!this.diagram) return
 
     const ctx = this.canvas.getContext('2d')
@@ -191,17 +201,22 @@ export class VoronoiDrawer {
     }
   }
 
-  rgbVoronoi(rgbAmount: number): void {
+  rgbVoronoi(rgbAmount: number, seed?: number): void {
     const ctx = this.canvas.getContext('2d')
     if (!ctx) return
+
+    // Use provided seed or generate a new one
+    const baseSeed = seed ?? randomSeed()
+    this.currentSeed = baseSeed
 
     ctx.globalCompositeOperation = 'lighter'
     const imgdata = ctx.getImageData(0, 0, this.width, this.height).data
 
-    // Each channel gets NEW random sites - this creates the chromatic aberration effect
-    this.fillVoronoi(1, true, imgdata, false, rgbAmount)
-    this.fillVoronoi(2, false, imgdata, false, rgbAmount)
-    this.fillVoronoi(3, false, imgdata, false, rgbAmount)
+    // Each channel gets a different seed derived from the base seed
+    // This creates the chromatic aberration effect while being reproducible
+    this.fillVoronoi(1, true, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 0))
+    this.fillVoronoi(2, false, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 1))
+    this.fillVoronoi(3, false, imgdata, false, rgbAmount, undefined, deriveSeed(baseSeed, 2))
 
     ctx.globalCompositeOperation = 'source-over'
   }

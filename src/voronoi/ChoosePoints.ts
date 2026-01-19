@@ -3,6 +3,8 @@ export interface Position {
   y: number
 }
 
+export type RandomFn = () => number
+
 export class ChoosePoint {
   private imgData: number[]
   private n: number
@@ -49,15 +51,15 @@ export class ChoosePoint {
     }
   }
 
-  pickPosition(): Position[] {
+  pickPosition(random: RandomFn = Math.random): Position[] {
     const choices = new Set<string>()
     const positions: Position[] = []
 
     while (positions.length < this.n) {
-      const selected = Math.floor(Math.random() * this.imgData.length)
+      const selected = Math.floor(random() * this.imgData.length)
       const selectedPosVal = this.imgData[selected]
 
-      if (Math.random() * 256 <= selectedPosVal) {
+      if (random() * 256 <= selectedPosVal) {
         const x = selected % this.width
         const y = Math.floor(selected / this.width)
         const key = `${x},${y}`
