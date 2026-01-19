@@ -1,41 +1,50 @@
 import { useRef, useEffect, useCallback, ChangeEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
+import { useUrlParams, intParam, boolParam } from 'use-prms/hash'
+import { useAction } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import { VoronoiDrawer, Position } from '../voronoi/VoronoiDrawer'
-import { randomSeed } from '../utils/random'
 import sampleImage from '../assets/sample.jpg'
 import './ImageVoronoi.css'
 
-interface DiagramState {
+interface ImageState {
   imageDataUrl: string | null
   sites: Position[]
-  seed: number
-  numSites: number
-  ifRGB: boolean
-  inversePP: boolean
-  dosage: number
 }
 
-const DEFAULT_STATE: DiagramState = {
+const DEFAULT_IMAGE_STATE: ImageState = {
   imageDataUrl: null,
   sites: [],
-  seed: randomSeed(),
-  numSites: 400,
-  ifRGB: false,
-  inversePP: false,
-  dosage: 0,
 }
+
+const SITES_STEP = 50
 
 export function ImageVoronoi() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const voronoiRef = useRef<VoronoiDrawer | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
+  const seedInputRef = useRef<HTMLInputElement>(null)
 
-  const [state, setState] = useSessionStorageState<DiagramState>('voronoi-state', {
-    defaultValue: DEFAULT_STATE,
+  // URL params for shareable settings
+  const { values, setValues } = useUrlParams({
+    s: intParam(0),        // seed (default 0, omitted from URL)
+    n: intParam(400),      // numSites
+    h: boolParam,          // ifRGB (Get High)
+    i: boolParam,          // inversePP
+    d: intParam(0),        // dosage
   })
 
-  const { imageDataUrl, sites, seed, numSites, ifRGB, inversePP, dosage } = state
+  const seed = values.s
+  const numSites = values.n
+  const ifRGB = values.h
+  const inversePP = values.i
+  const dosage = values.d
+
+  // Session storage for large data (image + sites)
+  const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
+    defaultValue: DEFAULT_IMAGE_STATE,
+  })
+  const { imageDataUrl, sites } = imageState
 
   const drawVoronoi = useCallback((
     drawer: VoronoiDrawer,
@@ -45,7 +54,6 @@ export function ImageVoronoi() {
     existingSites?: Position[],
   ): Position[] => {
     if (isRGB) {
-      // RGB mode uses seed to derive per-channel seeds
       drawer.rgbVoronoi(dosageVal, seedVal)
     } else {
       drawer.fillVoronoi(0, true, undefined, true, 0, existingSites, seedVal)
@@ -80,7 +88,7 @@ export function ImageVoronoi() {
     return drawVoronoi(voronoiRef.current, isRGB, dosageVal, seedVal, existingSites)
   }, [drawVoronoi])
 
-  // Load image and render on mount or when state changes
+  // Load image and render on mount
   useEffect(() => {
     const loadAndDraw = (src: string, seedVal: number, existingSites?: Position[]) => {
       const image = new Image()
@@ -97,18 +105,15 @@ export function ImageVoronoi() {
           seedVal,
           existingSites,
         )
-        // Only update sites if we generated new ones (non-RGB mode without existing sites)
         if (!ifRGB && (!existingSites || existingSites.length === 0)) {
-          setState(prev => ({ ...prev, sites: newSites }))
+          setImageState(prev => ({ ...prev, sites: newSites }))
         }
       }
     }
 
     if (imageDataUrl) {
-      // Restore from session storage
       loadAndDraw(imageDataUrl, seed, !ifRGB && sites.length > 0 ? sites : undefined)
     } else {
-      // Load sample image on first visit
       loadAndDraw(sampleImage, seed)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -124,14 +129,8 @@ export function ImageVoronoi() {
       image.src = dataUrl
       image.onload = () => {
         imgRef.current = image
-        const newSeed = randomSeed()
-        const newSites = drawImg(image, true, numSites, ifRGB, inversePP, dosage, newSeed)
-        setState(prev => ({
-          ...prev,
-          imageDataUrl: dataUrl,
-          seed: newSeed,
-          sites: ifRGB ? [] : newSites,
-        }))
+        const newSites = drawImg(image, true, numSites, ifRGB, inversePP, dosage, seed)
+        setImageState({ imageDataUrl: dataUrl, sites: ifRGB ? [] : newSites })
       }
     }
     reader.readAsDataURL(files[0])
@@ -139,61 +138,76 @@ export function ImageVoronoi() {
 
   const handleNumSitesChange = (e: ChangeEvent<HTMLInputElement>) => {
     const newNumSites = parseInt(e.target.value, 10)
+    updateNumSites(newNumSites)
+  }
 
+  const updateNumSites = (newNumSites: number) => {
     if (imgRef.current && voronoiRef.current) {
       voronoiRef.current.numSites = newNumSites
       const newSites = drawImg(imgRef.current, false, newNumSites, ifRGB, inversePP, dosage, seed)
-      setState(prev => ({ ...prev, numSites: newNumSites, sites: ifRGB ? [] : newSites }))
+      setValues({ n: newNumSites })
+      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
     }
   }
 
   const handleRGBChange = () => {
-    const newIfRGB = !ifRGB
+    toggleRGB()
+  }
 
+  const toggleRGB = () => {
+    const newIfRGB = !ifRGB
     if (imgRef.current) {
       const newSites = drawImg(imgRef.current, false, numSites, newIfRGB, inversePP, dosage, seed, newIfRGB ? undefined : sites)
-      setState(prev => ({ ...prev, ifRGB: newIfRGB, sites: newIfRGB ? [] : newSites }))
+      setValues({ h: newIfRGB })
+      setImageState(prev => ({ ...prev, sites: newIfRGB ? [] : newSites }))
     }
   }
 
   const handleInversePPChange = () => {
-    const newInversePP = !inversePP
+    toggleInversePP()
+  }
 
+  const toggleInversePP = () => {
+    const newInversePP = !inversePP
     if (imgRef.current) {
-      // Changing inversePP requires regenerating sites
       const newSites = drawImg(imgRef.current, true, numSites, ifRGB, newInversePP, dosage, seed)
-      setState(prev => ({ ...prev, inversePP: newInversePP, sites: ifRGB ? [] : newSites }))
+      setValues({ i: newInversePP })
+      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
     }
   }
 
   const handleDosageChange = (e: ChangeEvent<HTMLInputElement>) => {
     const newDosage = parseInt(e.target.value, 10)
-
     if (ifRGB && imgRef.current) {
       drawImg(imgRef.current, false, numSites, ifRGB, inversePP, newDosage, seed)
     }
-    setState(prev => ({ ...prev, dosage: newDosage }))
+    setValues({ d: newDosage })
   }
 
   const handleSeedChange = (e: ChangeEvent<HTMLInputElement>) => {
     const newSeed = parseInt(e.target.value, 10)
     if (isNaN(newSeed)) return
-
-    if (imgRef.current) {
-      const newSites = drawImg(imgRef.current, false, numSites, ifRGB, inversePP, dosage, newSeed)
-      setState(prev => ({ ...prev, seed: newSeed, sites: ifRGB ? [] : newSites }))
-    }
+    updateSeed(newSeed)
   }
 
-  const handleRandomizeSeed = () => {
-    const newSeed = randomSeed()
+  const updateSeed = (newSeed: number) => {
     if (imgRef.current) {
       const newSites = drawImg(imgRef.current, false, numSites, ifRGB, inversePP, dosage, newSeed)
-      setState(prev => ({ ...prev, seed: newSeed, sites: ifRGB ? [] : newSites }))
+      setValues({ s: newSeed })
+      setImageState(prev => ({ ...prev, sites: ifRGB ? [] : newSites }))
     }
   }
 
   const handleDownload = () => {
+    downloadImage()
+  }
+
+  const focusSeedInput = () => {
+    seedInputRef.current?.focus()
+    seedInputRef.current?.select()
+  }
+
+  const downloadImage = () => {
     const canvas = canvasRef.current
     if (!canvas) return
 
@@ -203,6 +217,49 @@ export function ImageVoronoi() {
       }
     })
   }
+
+  // Keyboard shortcuts
+  useAction('voronoi:focus-seed', {
+    label: 'Focus seed input',
+    group: 'Voronoi',
+    defaultBindings: ['f'],
+    handler: focusSeedInput,
+  })
+
+  useAction('voronoi:toggle-rgb', {
+    label: 'Toggle Get High (RGB)',
+    group: 'Voronoi',
+    defaultBindings: ['h'],
+    handler: toggleRGB,
+  })
+
+  useAction('voronoi:toggle-inverse', {
+    label: 'Toggle Inverse PP',
+    group: 'Voronoi',
+    defaultBindings: ['i'],
+    handler: toggleInversePP,
+  })
+
+  useAction('voronoi:increase-sites', {
+    label: 'Increase sites',
+    group: 'Voronoi',
+    defaultBindings: [']', '='],
+    handler: () => updateNumSites(Math.min(4000, numSites + SITES_STEP)),
+  })
+
+  useAction('voronoi:decrease-sites', {
+    label: 'Decrease sites',
+    group: 'Voronoi',
+    defaultBindings: ['[', '-'],
+    handler: () => updateNumSites(Math.max(50, numSites - SITES_STEP)),
+  })
+
+  useAction('voronoi:download', {
+    label: 'Download image',
+    group: 'Voronoi',
+    defaultBindings: ['s', 'meta+s'],
+    handler: downloadImage,
+  })
 
   return (
     <div className="IV">
@@ -236,14 +293,13 @@ export function ImageVoronoi() {
         <div className="control-wrapper seed-control">
           <label className="control-label">Seed</label>
           <input
+            ref={seedInputRef}
             className="seed-input"
             type="number"
+            min="0"
             value={seed}
             onChange={handleSeedChange}
           />
-          <button className="seed-randomize" onClick={handleRandomizeSeed} title="Randomize">
-            ↻
-          </button>
         </div>
 
         <div className="control-wrapper">

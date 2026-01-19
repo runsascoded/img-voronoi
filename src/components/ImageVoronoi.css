@@ -89,12 +89,11 @@
 }
 
 .seed-control {
-  width: 160px;
+  width: 100px;
 }
 
 .seed-input {
-  width: 100px;
-  float: left;
+  width: 60px;
   background: #1a3a4a;
   border: 1px solid #3a7982;
   border-radius: 2px;
@@ -110,32 +109,7 @@
   border-color: #5ab;
 }
 
-.seed-input::-webkit-inner-spin-button,
-.seed-input::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
 
-.seed-input[type=number] {
-  -moz-appearance: textfield;
-}
-
-.seed-randomize {
-  float: right;
-  background: #1a3a4a;
-  border: 1px solid #3a7982;
-  border-radius: 2px;
-  color: #bbebd8;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 1px 6px;
-  margin-top: 2px;
-}
-
-.seed-randomize:hover {
-  background: #2a5a6a;
-  border-color: #5ab;
-}
 
 .checkbox {
   cursor: pointer;

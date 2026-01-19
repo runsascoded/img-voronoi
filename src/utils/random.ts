@@ -12,10 +12,10 @@ export function createSeededRandom(seed: number): () => number {
 }
 
 /**
- * Generate a random seed
+ * Generate a random seed (small, human-friendly numbers)
  */
 export function randomSeed(): number {
-  return Math.floor(Math.random() * 0xFFFFFFFF)
+  return Math.floor(Math.random() * 10000)
 }
 
 /**
