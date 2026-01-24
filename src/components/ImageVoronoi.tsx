@@ -6,6 +6,8 @@ import { saveAs } from 'file-saver'
 import Tooltip from '@mui/material/Tooltip'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
+import { ImageGallery, storeImage } from './ImageGallery'
+import { isOPFSSupported } from '../storage/ImageStorage'
 import sampleImage from '../assets/sample.jpg'
 import './ImageVoronoi.css'
 
@@ -140,6 +142,7 @@ export function ImageVoronoi() {
   // Image metadata
   const [imageFilename, setImageFilename] = useState<string | null>(null)
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null)
+  const [currentImageId, setCurrentImageId] = useState<string | undefined>(undefined)
 
   // Image scaling - store original full-res and current scale
   const [originalDimensions, setOriginalDimensions] = useState<{ width: number; height: number } | null>(null)
@@ -520,7 +523,7 @@ export function ImageVoronoi() {
       const dataUrl = event.target?.result as string
       const image = new Image()
       image.src = dataUrl
-      image.onload = () => {
+      image.onload = async () => {
         // Store original full-resolution image
         originalImageRef.current = image
         setOriginalDimensions({ width: image.width, height: image.height })
@@ -532,6 +535,16 @@ export function ImageVoronoi() {
         const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
         setImageState({ imageDataUrl: dataUrl, sites: newSites })
         pushHistory({ imageDataUrl: dataUrl, sites: newSites, seed, numSites, inversePP })
+
+        // Store to OPFS if supported
+        if (isOPFSSupported()) {
+          try {
+            const stored = await storeImage(file)
+            setCurrentImageId(stored.id)
+          } catch (e) {
+            console.warn('[OPFS] Failed to store image:', e)
+          }
+        }
       }
     }
     reader.readAsDataURL(file)
@@ -1430,6 +1443,39 @@ export function ImageVoronoi() {
     handler: triggerUpload,
   })
 
+  // Handle selecting an image from the gallery
+  const handleSelectFromGallery = useCallback((blob: Blob, basename: string, id?: string) => {
+    if (id) setCurrentImageId(id)
+
+    const url = URL.createObjectURL(blob)
+    const image = new Image()
+    image.src = url
+    image.onload = () => {
+      // Store original full-resolution image
+      originalImageRef.current = image
+      setOriginalDimensions({ width: image.width, height: image.height })
+      setImageScale(1)
+
+      imgRef.current = image
+      setImageFilename(basename)
+      setImageDimensions({ width: image.width, height: image.height })
+
+      // Convert blob to data URL for session storage
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        const dataUrl = e.target?.result as string
+        const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
+        setImageState({ imageDataUrl: dataUrl, sites: newSites })
+        pushHistory({ imageDataUrl: dataUrl, sites: newSites, seed, numSites, inversePP })
+        URL.revokeObjectURL(url)
+      }
+      reader.readAsDataURL(blob)
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(url)
+    }
+  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory])
+
 
   const toggleWebGL = useCallback(() => {
     if (!webglSupported) return
@@ -1481,13 +1527,18 @@ export function ImageVoronoi() {
     : <span>{numSites}</span>
 
   return (
-    <div
-      className={`IV${isDragging ? ' dragging' : ''}`}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
-      <div className="canvas-container">
+    <>
+      <ImageGallery
+        onSelectImage={handleSelectFromGallery}
+        currentImageId={currentImageId}
+      />
+      <div
+        className={`IV${isDragging ? ' dragging' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div className="canvas-container">
         <canvas
           className="canvas"
           ref={canvasRef}
@@ -1677,5 +1728,6 @@ export function ImageVoronoi() {
         </div>
       </div>
     </div>
+    </>
   )
 }
