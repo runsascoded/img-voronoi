@@ -284,12 +284,13 @@ export class VoronoiWebGL {
 
   /**
    * Compute cell colors by averaging image pixels
+   * Also returns cell areas (pixel counts)
    */
-  computeColors(cellOf: Int32Array, imgdata: Uint8ClampedArray, numSites: number): RGB[] {
+  computeColors(cellOf: Int32Array, imgdata: Uint8ClampedArray, numSites: number): { cellColors: RGB[]; cellAreas: Uint32Array } {
     const rSum = new Float64Array(numSites)
     const gSum = new Float64Array(numSites)
     const bSum = new Float64Array(numSites)
-    const counts = new Uint32Array(numSites)
+    const cellAreas = new Uint32Array(numSites)
 
     for (let i = 0; i < cellOf.length; i++) {
       const cell = cellOf[i]
@@ -298,13 +299,13 @@ export class VoronoiWebGL {
         rSum[cell] += imgdata[px]
         gSum[cell] += imgdata[px + 1]
         bSum[cell] += imgdata[px + 2]
-        counts[cell]++
+        cellAreas[cell]++
       }
     }
 
     const cellColors: RGB[] = new Array(numSites)
     for (let i = 0; i < numSites; i++) {
-      const count = counts[i]
+      const count = cellAreas[i]
       if (count > 0) {
         cellColors[i] = [
           (rSum[i] / count) | 0,
@@ -316,16 +317,16 @@ export class VoronoiWebGL {
       }
     }
 
-    return cellColors
+    return { cellColors, cellAreas }
   }
 
   /**
-   * Full Voronoi computation: cell assignment + color averaging
+   * Full Voronoi computation: cell assignment + color averaging + areas
    */
-  compute(sites: Position[], imgdata: Uint8ClampedArray): { cellOf: Int32Array; cellColors: RGB[] } {
+  compute(sites: Position[], imgdata: Uint8ClampedArray): { cellOf: Int32Array; cellColors: RGB[]; cellAreas: Uint32Array } {
     const cellOf = this.computeCells(sites)
-    const cellColors = this.computeColors(cellOf, imgdata, sites.length)
-    return { cellOf, cellColors }
+    const { cellColors, cellAreas } = this.computeColors(cellOf, imgdata, sites.length)
+    return { cellOf, cellColors, cellAreas }
   }
 
   dispose(): void {

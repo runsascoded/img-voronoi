@@ -1,8 +1,9 @@
 import { useRef, useEffect, useCallback, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
-import { useUrlParams, intParam, boolParam, Param } from 'use-prms/hash'
+import { useUrlParams, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
 import { useAction } from 'use-kbd'
 import { saveAs } from 'file-saver'
+import Tooltip from '@mui/material/Tooltip'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
 import sampleImage from '../assets/sample.jpg'
@@ -37,8 +38,8 @@ const DEFAULT_IMAGE_STATE: ImageState = {
 const MAX_HISTORY = 50
 
 const SITES_STEP = 50
-const SITES_MIN = 50
-const SITES_MAX = 10000
+const SITES_MIN = 25
+const SITES_MAX = 20000
 const PHI = 1.618033988749895  // Golden ratio
 
 /**
@@ -108,14 +109,14 @@ export function ImageVoronoi() {
   const webglRef = useRef<VoronoiWebGL | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const seedInputRef = useRef<HTMLInputElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [webglSupported, setWebglSupported] = useState(true)  // Detect on mount
 
   // Animation state
   const [isPlaying, setIsPlaying] = useState(false)
   const [fps, setFps] = useState(0)
-  const [usePixelRendering, setUsePixelRendering] = useState(true)
-  const [useL1Metric, setUseL1Metric] = useState(false)
+  const [usePixelRendering] = useState(true)  // Always use pixel rendering
   const animationFrameRef = useRef<number | null>(null)
   const originalImgDataRef = useRef<ImageData | null>(null)
   const animatedSitesRef = useRef<Position[]>([])
@@ -130,6 +131,24 @@ export function ImageVoronoi() {
   const [hoveredCell, setHoveredCell] = useState<number | null>(null)
   const cellOfRef = useRef<Int32Array | null>(null)
   const cellColorsRef = useRef<RGB[] | null>(null)
+  const cellAreasRef = useRef<Uint32Array | null>(null)
+
+  // Site visualization
+  const [showSites, setShowSites] = useState(false)
+  const showSitesRef = useRef(false)
+
+  // Image metadata
+  const [imageFilename, setImageFilename] = useState<string | null>(null)
+  const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null)
+
+  // Image scaling - store original full-res and current scale
+  const [originalDimensions, setOriginalDimensions] = useState<{ width: number; height: number } | null>(null)
+  const originalImageRef = useRef<HTMLImageElement | null>(null)  // Keep full-res in memory
+  const [imageScale, setImageScale] = useState(1)  // Current scale factor (1 = full res)
+
+  // Current and target site counts for UI display during gradual growth
+  const [currentSiteCount, setCurrentSiteCount] = useState(0)
+  const [targetSiteCount, setTargetSiteCount] = useState(0)
 
   // Refs to track settings for callbacks
   const metricRef = useRef<DistanceMetric>('L2')
@@ -148,6 +167,7 @@ export function ImageVoronoi() {
     i: boolParam,          // inversePP
     v: intParam(15),       // speed (velocity, pixels/sec)
     g: boolParamDefaultTrue,  // WebGL (gpu acceleration, default true)
+    d: floatParam(0),      // doublingTime (seconds, 0 = instant/disabled)
   })
 
   const seed = values.s
@@ -155,6 +175,11 @@ export function ImageVoronoi() {
   const inversePP = values.i
   const speed = values.v
   const useWebGL = values.g
+  const doublingTime = values.d
+
+  // Gradual growth state (for smooth site count changes)
+  const targetSitesRef = useRef<number>(numSites)  // Target we're growing/shrinking toward
+  const fractionalSitesRef = useRef<number>(0)     // Accumulated fractional sites
 
   // Session storage for large data (image + sites)
   const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
@@ -231,16 +256,25 @@ export function ImageVoronoi() {
 
   // Keep refs in sync with state
   useEffect(() => {
-    metricRef.current = useL1Metric ? 'L1' : 'L2'
-  }, [useL1Metric])
-
-  useEffect(() => {
     pixelRenderingRef.current = usePixelRendering
   }, [usePixelRendering])
 
   useEffect(() => {
     webglRef2.current = useWebGL && webglSupported
   }, [useWebGL, webglSupported])
+
+  useEffect(() => {
+    showSitesRef.current = showSites
+  }, [showSites])
+
+  // Sync targetSitesRef when numSites changes from slider or other direct updates
+  useEffect(() => {
+    // Only sync if not in gradual mode or if we're not animating
+    // (during animation, targetSitesRef is managed separately)
+    if (doublingTime === 0 || !isPlaying) {
+      targetSitesRef.current = numSites
+    }
+  }, [numSites, doublingTime, isPlaying])
 
   // Detect WebGL support on mount
   useEffect(() => {
@@ -289,7 +323,6 @@ export function ImageVoronoi() {
       if (webglRef2.current) {
         const webgl = ensureWebGL()
         if (webgl) {
-          const t0 = performance.now()
           // Use existing sites, or get from drawer if count matches, otherwise regenerate
           const existingOrCached = existingSites || drawer.getSites()
           const finalSites = existingOrCached.length === drawer.numSites
@@ -303,10 +336,10 @@ export function ImageVoronoi() {
               const result = webgl.compute(finalSites, imgData.data)
               cellOfRef.current = result.cellOf
               cellColorsRef.current = result.cellColors
+              cellAreasRef.current = result.cellAreas
 
               // Draw the result
               drawer.drawFromCellData(result.cellOf, result.cellColors, finalSites)
-              console.log(`[WebGL] ${(performance.now() - t0).toFixed(1)}ms`)
             }
           }
           return finalSites
@@ -326,6 +359,88 @@ export function ImageVoronoi() {
     }
     return drawer.getSites()
   }, [ensureWebGL])
+
+  // Compute available scale options based on original dimensions
+  const getScaleOptions = useCallback((origWidth: number, origHeight: number) => {
+    const options: { label: string; scale: number; dims: string }[] = []
+
+    // Full resolution
+    options.push({ label: '1×', scale: 1, dims: `${origWidth}×${origHeight}` })
+
+    // 3/4 scale if both dimensions are multiples of 4
+    if (origWidth % 4 === 0 && origHeight % 4 === 0) {
+      const w = Math.round(origWidth * 0.75)
+      const h = Math.round(origHeight * 0.75)
+      options.push({ label: '¾×', scale: 0.75, dims: `${w}×${h}` })
+    }
+
+    // Power of 2 downscales
+    let scale = 0.5
+    while (scale >= 0.125) {  // Down to 1/8
+      const w = Math.round(origWidth * scale)
+      const h = Math.round(origHeight * scale)
+      if (w >= 100 && h >= 100) {  // Minimum useful size
+        const label = scale === 0.5 ? '½×' : scale === 0.25 ? '¼×' : `1/${Math.round(1/scale)}×`
+        options.push({ label, scale, dims: `${w}×${h}` })
+      }
+      scale /= 2
+    }
+
+    return options
+  }, [])
+
+  // Apply scale to the original image and redraw
+  const applyImageScale = useCallback((scale: number) => {
+    const origImg = originalImageRef.current
+    if (!origImg) return
+
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const newWidth = Math.round(origImg.width * scale)
+    const newHeight = Math.round(origImg.height * scale)
+
+    canvas.width = newWidth
+    canvas.height = newHeight
+    ctx.drawImage(origImg, 0, 0, newWidth, newHeight)
+
+    // Update dimensions display
+    setImageDimensions({ width: newWidth, height: newHeight })
+    setImageScale(scale)
+
+    // Store scaled image data
+    originalImgDataRef.current = ctx.getImageData(0, 0, newWidth, newHeight)
+
+    // Create scaled image element for imgRef
+    const scaledImg = new Image()
+    scaledImg.width = newWidth
+    scaledImg.height = newHeight
+    const dataUrl = canvas.toDataURL()
+    scaledImg.src = dataUrl
+    scaledImg.onload = () => {
+      imgRef.current = scaledImg
+
+      // Reinitialize WebGL with new dimensions
+      if (webglRef.current) {
+        webglRef.current.dispose()
+        webglRef.current = null
+      }
+
+      // Reinitialize Voronoi drawer and redraw
+      voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
+      const newSites = drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
+      setImageState(prev => ({ ...prev, sites: newSites }))
+
+      // Clear animation state since image changed
+      animatedSitesRef.current = []
+      velocitiesRef.current = []
+      animationHistoryRef.current = []
+      historyPositionRef.current = 0
+    }
+  }, [numSites, inversePP, seed, drawVoronoi, setImageState])
 
   const drawImg = useCallback((
     image: HTMLImageElement,
@@ -362,8 +477,17 @@ export function ImageVoronoi() {
       const image = new Image()
       image.src = src || sampleImage
       image.onload = () => {
+        // Store original full-resolution image
+        originalImageRef.current = image
+        setOriginalDimensions({ width: image.width, height: image.height })
+        setImageScale(1)
+
         imgRef.current = image
+        setImageDimensions({ width: image.width, height: image.height })
+        if (!src) setImageFilename('sample.jpg')
         const newSites = drawImg(image, true, numSites, inversePP, seedVal, existingSites, pixelRenderingRef.current)
+        setCurrentSiteCount(newSites.length)
+        setTargetSiteCount(numSites)
         const finalSites = existingSites && existingSites.length > 0 ? existingSites : newSites
         if (!existingSites || existingSites.length === 0) {
           setImageState(prev => ({ ...prev, sites: newSites }))
@@ -397,7 +521,14 @@ export function ImageVoronoi() {
       const image = new Image()
       image.src = dataUrl
       image.onload = () => {
+        // Store original full-resolution image
+        originalImageRef.current = image
+        setOriginalDimensions({ width: image.width, height: image.height })
+        setImageScale(1)
+
         imgRef.current = image
+        setImageFilename(file.name)
+        setImageDimensions({ width: image.width, height: image.height })
         const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
         setImageState({ imageDataUrl: dataUrl, sites: newSites })
         pushHistory({ imageDataUrl: dataUrl, sites: newSites, seed, numSites, inversePP })
@@ -570,6 +701,30 @@ export function ImageVoronoi() {
     pushHistory({ imageDataUrl, sites: sitesToDraw, seed, numSites: targetCount, inversePP })
   }, [seed, inversePP, imageDataUrl, setValues, setImageState, pushHistory, drawVoronoi])
 
+  // Request a site count change - gradual if doublingTime > 0, instant otherwise
+  const requestSiteChange = useCallback((targetCount: number) => {
+    targetCount = Math.max(SITES_MIN, Math.min(SITES_MAX, targetCount))
+    setTargetSiteCount(targetCount)
+
+    if (doublingTime > 0) {
+      // Gradual mode: set target and let animation handle it
+      targetSitesRef.current = targetCount
+      fractionalSitesRef.current = 0  // Reset accumulator
+
+      // If not animating, need to start a temporary animation loop
+      // For now, just do instant change when not playing
+      if (!isPlaying) {
+        scaleSitesWithSplitMerge(targetCount)
+        setCurrentSiteCount(targetCount)
+      }
+      // When playing, the animationStep will handle gradual growth
+    } else {
+      // Instant mode
+      scaleSitesWithSplitMerge(targetCount)
+      setCurrentSiteCount(targetCount)
+    }
+  }, [doublingTime, isPlaying, scaleSitesWithSplitMerge])
+
   const handleInversePPChange = () => {
     toggleInversePP()
   }
@@ -651,10 +806,67 @@ export function ImageVoronoi() {
       return { x: Math.cos(angle), y: Math.sin(angle) }
     })
 
+    // Initialize current/target site counts
+    setCurrentSiteCount(currentSites.length)
+    setTargetSiteCount(targetSitesRef.current)
+
     // Initialize history with current state
     animationHistoryRef.current = [currentSites.map(s => ({ ...s }))]
     historyPositionRef.current = 0
   }, [numSites])
+
+  // Draw site markers and velocity vectors on the canvas
+  const drawSitesOverlay = useCallback((ctx: CanvasRenderingContext2D, sites: Position[], velocities?: Position[]) => {
+    if (!showSitesRef.current) return
+
+    const velocityScale = 20  // Length of velocity arrows
+
+    // Draw velocity vectors first (so dots are on top)
+    if (velocities && velocities.length === sites.length) {
+      ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)'
+      ctx.lineWidth = 1.5
+      for (let i = 0; i < sites.length; i++) {
+        const site = sites[i]
+        const vel = velocities[i]
+        ctx.beginPath()
+        ctx.moveTo(site.x, site.y)
+        ctx.lineTo(site.x + vel.x * velocityScale, site.y + vel.y * velocityScale)
+        ctx.stroke()
+      }
+    }
+
+    // Draw site dots
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)'
+    ctx.lineWidth = 1
+    for (const site of sites) {
+      ctx.beginPath()
+      ctx.arc(site.x, site.y, 3, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.stroke()
+    }
+  }, [])
+
+  // Redraw when showSites changes (if not animating)
+  useEffect(() => {
+    if (!isPlaying && animatedSitesRef.current.length > 0) {
+      const canvas = canvasRef.current
+      const drawer = voronoiRef.current
+      const originalImgData = originalImgDataRef.current
+      if (canvas && drawer && originalImgData) {
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          ctx.putImageData(originalImgData, 0, 0)
+          if (pixelRenderingRef.current) {
+            drawer.drawFromCellData(cellOfRef.current!, cellColorsRef.current!, animatedSitesRef.current)
+          } else {
+            drawer.fillVoronoi(animatedSitesRef.current)
+          }
+          drawSitesOverlay(ctx, animatedSitesRef.current, velocitiesRef.current)
+        }
+      }
+    }
+  }, [showSites, isPlaying, drawSitesOverlay])
 
   // Render a specific frame (sites) without advancing physics
   const renderFrame = useCallback((sites: Position[]) => {
@@ -677,6 +889,7 @@ export function ImageVoronoi() {
           const result = webgl.compute(sites, imgData.data)
           cellOfRef.current = result.cellOf
           cellColorsRef.current = result.cellColors
+          cellAreasRef.current = result.cellAreas
           drawer.drawFromCellData(result.cellOf, result.cellColors, sites)
           return
         }
@@ -686,11 +899,15 @@ export function ImageVoronoi() {
       if (result) {
         cellOfRef.current = result.cellOf
         cellColorsRef.current = result.cellColors
+        cellAreasRef.current = null  // CPU path doesn't compute areas yet
       }
     } else {
       drawer.fillVoronoi(sites)
     }
-  }, [ensureWebGL])
+
+    // Draw site markers if enabled
+    drawSitesOverlay(ctx, sites, velocitiesRef.current)
+  }, [ensureWebGL, drawSitesOverlay])
 
   const animationStep = useCallback((saveToHistory = true) => {
     const canvas = canvasRef.current
@@ -731,6 +948,105 @@ export function ImageVoronoi() {
       }
     }
 
+    // Gradual growth: smoothly add/remove sites toward target
+    if (doublingTime > 0 && targetSitesRef.current !== animatedSites.length) {
+      const target = targetSitesRef.current
+      const current = animatedSites.length
+      const growing = target > current
+
+      // Rate: sites change at ln(2)/doublingTime per site per second
+      // This gives exponential growth with the specified doubling time
+      const rate = Math.LN2 / doublingTime
+      const expectedChange = current * rate * deltaTime
+
+      // Accumulate fractional sites
+      fractionalSitesRef.current += expectedChange
+
+      // Snapshot cell areas at frame start (before any splits modify animatedSites.length)
+      const cellAreas = cellAreasRef.current
+      const areasValid = cellAreas && cellAreas.length > 0
+
+      // Track which sites we've already split this frame (they'll have ~half their original area)
+      const splitThisFrame = new Set<number>()
+
+      // Process whole sites
+      while (fractionalSitesRef.current >= 1) {
+        fractionalSitesRef.current -= 1
+
+        if (growing && animatedSites.length < target) {
+          // Split: pick site with largest cell area (among original sites not yet split)
+          let srcIdx = 0
+          if (areasValid) {
+            // Find site with maximum area that hasn't been split this frame
+            // Only consider original sites (indices < cellAreas.length)
+            let maxArea = -1
+            for (let i = 0; i < cellAreas.length; i++) {
+              if (!splitThisFrame.has(i) && cellAreas[i] > maxArea) {
+                maxArea = cellAreas[i]
+                srcIdx = i
+              }
+            }
+            // If all original sites were split, pick from newly added ones randomly
+            if (maxArea < 0) {
+              srcIdx = Math.floor(Math.random() * animatedSites.length)
+            }
+            splitThisFrame.add(srcIdx)
+          } else {
+            // Fallback to random if areas not available
+            srcIdx = Math.floor(Math.random() * animatedSites.length)
+          }
+          const src = animatedSites[srcIdx]
+
+          // New site starts at exactly the same position
+          animatedSites.push({ x: src.x, y: src.y })
+
+          // Give parent and child diverging velocities
+          const divergeAngle = Math.random() * Math.PI * 2
+          const divergeX = Math.cos(divergeAngle)
+          const divergeY = Math.sin(divergeAngle)
+
+          // Child gets velocity pointing in diverge direction
+          velocities.push({ x: divergeX, y: divergeY })
+          // Parent gets velocity pointing opposite
+          velocities[srcIdx] = { x: -divergeX, y: -divergeY }
+        } else if (!growing && animatedSites.length > target) {
+          // Merge: remove site with smallest cell area
+          const cellAreas = cellAreasRef.current
+          let removeIdx = 0
+          if (cellAreas && cellAreas.length === animatedSites.length) {
+            // Find site with minimum area
+            let minArea = cellAreas[0]
+            for (let i = 1; i < cellAreas.length; i++) {
+              if (cellAreas[i] < minArea) {
+                minArea = cellAreas[i]
+                removeIdx = i
+              }
+            }
+          } else {
+            // Fallback to random if areas not available
+            removeIdx = Math.floor(Math.random() * animatedSites.length)
+          }
+          animatedSites.splice(removeIdx, 1)
+          velocities.splice(removeIdx, 1)
+        }
+      }
+
+      // Update drawer's numSites to match current animated count
+      if (drawer.numSites !== animatedSites.length) {
+        drawer.numSites = animatedSites.length
+        setCurrentSiteCount(animatedSites.length)
+        // Only update URL when we reach the target (avoid throttling warnings)
+        if (animatedSites.length === target) {
+          setValues({ n: animatedSites.length })
+        }
+      }
+
+      // Clear fractional accumulator when target reached
+      if (animatedSites.length === target) {
+        fractionalSitesRef.current = 0
+      }
+    }
+
     // Save to history if enabled
     if (saveToHistory) {
       const history = animationHistoryRef.current
@@ -765,6 +1081,7 @@ export function ImageVoronoi() {
           const result = webgl.compute(animatedSites, imgData.data)
           cellOfRef.current = result.cellOf
           cellColorsRef.current = result.cellColors
+          cellAreasRef.current = result.cellAreas
           drawer.drawFromCellData(result.cellOf, result.cellColors, animatedSites)
         } else {
           // Fall back to CPU if WebGL failed
@@ -772,6 +1089,7 @@ export function ImageVoronoi() {
           if (result) {
             cellOfRef.current = result.cellOf
             cellColorsRef.current = result.cellColors
+            cellAreasRef.current = null
           }
         }
       } else {
@@ -779,11 +1097,15 @@ export function ImageVoronoi() {
         if (result) {
           cellOfRef.current = result.cellOf
           cellColorsRef.current = result.cellColors
+          cellAreasRef.current = null
         }
       }
     } else {
       drawer.fillVoronoi(animatedSites)
     }
+
+    // Draw site markers if enabled
+    drawSitesOverlay(ctx, animatedSites, velocities)
 
     // Update FPS (reuse `now` from delta time calculation above)
     frameCountRef.current++
@@ -793,7 +1115,7 @@ export function ImageVoronoi() {
       frameCountRef.current = 0
       fpsUpdateTimeRef.current = fpsNow
     }
-  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed])
+  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, setValues, drawSitesOverlay])
 
   const animate = useCallback(() => {
     animationStep()
@@ -873,34 +1195,6 @@ export function ImageVoronoi() {
     console.log(`[step] ${(performance.now() - t0).toFixed(0)}ms`)
   }, [initializeAnimation, renderFrame, animationStep])
 
-  const toggleRenderMode = useCallback(() => {
-    setUsePixelRendering(prev => {
-      const newValue = !prev
-      // Update ref immediately so re-render uses the new mode
-      pixelRenderingRef.current = newValue
-      // Re-render with the new mode
-      if (imgRef.current && voronoiRef.current) {
-        const canvas = canvasRef.current
-        const ctx = canvas?.getContext('2d')
-        if (canvas && ctx) {
-          ctx.drawImage(imgRef.current, 0, 0)
-          originalImgDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height)
-          if (newValue) {
-            const result = voronoiRef.current.fillVoronoiPixels(undefined, seed, metricRef.current)
-            if (result) {
-              cellOfRef.current = result.cellOf
-              cellColorsRef.current = result.cellColors
-            }
-          } else {
-            voronoiRef.current.fillVoronoi(undefined, seed)
-            cellOfRef.current = null
-            cellColorsRef.current = null
-          }
-        }
-      }
-      return newValue
-    })
-  }, [seed])
 
   // Render with hover effect - show original image for hovered cell with border
   const renderWithHover = useCallback((hoveredCellIdx: number | null) => {
@@ -1061,12 +1355,6 @@ export function ImageVoronoi() {
     handler: togglePlay,
   })
 
-  useAction('voronoi:toggle-render-mode', {
-    label: 'Toggle pixel/polygon rendering',
-    group: 'Voronoi',
-    defaultBindings: ['p'],
-    handler: toggleRenderMode,
-  })
 
   useAction('voronoi:increase-sites', {
     label: 'Increase sites (+50)',
@@ -1086,28 +1374,28 @@ export function ImageVoronoi() {
     label: 'Double sites (×2)',
     group: 'Sites',
     defaultBindings: ['}'],
-    handler: () => updateNumSites(Math.min(SITES_MAX, numSites * 2)),
+    handler: () => requestSiteChange(Math.min(SITES_MAX, targetSitesRef.current * 2)),
   })
 
   useAction('voronoi:halve-sites', {
     label: 'Halve sites (÷2)',
     group: 'Sites',
     defaultBindings: ['{'],
-    handler: () => updateNumSites(Math.max(SITES_MIN, Math.round(numSites / 2))),
+    handler: () => requestSiteChange(Math.max(SITES_MIN, Math.round(targetSitesRef.current / 2))),
   })
 
   useAction('voronoi:golden-up', {
-    label: 'Scale sites up (×φ) with split',
+    label: 'Scale sites up (×φ)',
     group: 'Sites',
     defaultBindings: [')'],
-    handler: () => scaleSitesWithSplitMerge(Math.min(SITES_MAX, Math.floor(numSites * PHI))),
+    handler: () => requestSiteChange(Math.floor(targetSitesRef.current * PHI)),
   })
 
   useAction('voronoi:golden-down', {
-    label: 'Scale sites down (÷φ) with merge',
+    label: 'Scale sites down (÷φ)',
     group: 'Sites',
     defaultBindings: ['('],
-    handler: () => scaleSitesWithSplitMerge(Math.max(SITES_MIN, Math.ceil(numSites / PHI))),
+    handler: () => requestSiteChange(Math.ceil(targetSitesRef.current / PHI)),
   })
 
   useAction('voronoi:step-forward', {
@@ -1131,35 +1419,17 @@ export function ImageVoronoi() {
     handler: downloadImage,
   })
 
-  const toggleMetric = useCallback(() => {
-    setUseL1Metric(prev => {
-      const newValue = !prev
-      // Update ref immediately so re-render uses the new metric
-      metricRef.current = newValue ? 'L1' : 'L2'
-      // Re-render with the new metric
-      if (imgRef.current && voronoiRef.current) {
-        const canvas = canvasRef.current
-        const ctx = canvas?.getContext('2d')
-        if (canvas && ctx) {
-          ctx.drawImage(imgRef.current, 0, 0)
-          originalImgDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height)
-          const result = voronoiRef.current.fillVoronoiPixels(undefined, seed, newValue ? 'L1' : 'L2')
-          if (result) {
-            cellOfRef.current = result.cellOf
-            cellColorsRef.current = result.cellColors
-          }
-        }
-      }
-      return newValue
-    })
-  }, [seed])
+  const triggerUpload = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
 
-  useAction('voronoi:toggle-metric', {
-    label: 'Toggle L1/L2 metric',
+  useAction('voronoi:upload', {
+    label: 'Upload image',
     group: 'Voronoi',
-    defaultBindings: ['m'],
-    handler: toggleMetric,
+    defaultBindings: ['u'],
+    handler: triggerUpload,
   })
+
 
   const toggleWebGL = useCallback(() => {
     if (!webglSupported) return
@@ -1185,6 +1455,31 @@ export function ImageVoronoi() {
     handler: toggleWebGL,
   })
 
+  // SVG icons
+  const PlayIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+  )
+  const PauseIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+  )
+  const DownloadIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
+  )
+  const UploadIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M5 4h14v2H5V4zm0 10h4v6h6v-6h4l-7-7-7 7z"/></svg>
+  )
+  const StepBackIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+  )
+  const StepForwardIcon = () => (
+    <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+  )
+
+  // Format sites display: show "current→target" when growing, otherwise just the number
+  const sitesDisplay = currentSiteCount !== targetSiteCount
+    ? <><span className="sites-current">{currentSiteCount}</span><span className="sites-arrow">→</span><span className="sites-target">{targetSiteCount}</span></>
+    : <span>{numSites}</span>
+
   return (
     <div
       className={`IV${isDragging ? ' dragging' : ''}`}
@@ -1192,132 +1487,7 @@ export function ImageVoronoi() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
-      <div className="nav-wrapper light-bg">
-        <div className="control-wrapper">
-          <label className="control-label file-label">
-            Upload
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleFileChange}
-              className="file-input"
-            />
-          </label>
-        </div>
-
-        <div className="control-wrapper sites-control">
-          <label className="control-label">Sites</label>
-          <label className="control-input control-number number">{numSites}</label>
-          <input
-            className="control-input control-slider slider"
-            type="range"
-            value={numSites}
-            min="50"
-            max={SITES_MAX}
-            step="50"
-            onChange={handleNumSitesChange}
-          />
-        </div>
-
-        <div className="control-wrapper seed-control">
-          <label className="control-label">Seed</label>
-          <input
-            ref={seedInputRef}
-            className="seed-input"
-            type="number"
-            min="0"
-            value={seed}
-            onChange={handleSeedChange}
-          />
-        </div>
-
-        <div className="control-wrapper">
-          <label className="selection-label">
-            <input
-              className="control-input checkbox"
-              type="checkbox"
-              checked={inversePP}
-              onChange={handleInversePPChange}
-            />
-            {' '}Inverse PP
-          </label>
-        </div>
-
-        <div className="control-wrapper">
-          <button className="output-button" onClick={handleDownload}>
-            Download Image
-          </button>
-        </div>
-
-        <div className="control-wrapper">
-          <button className="output-button" onClick={togglePlay}>
-            {isPlaying ? 'Pause' : 'Play'}
-          </button>
-        </div>
-
-        <div className="control-wrapper">
-          <label className="selection-label">
-            <input
-              className="control-input checkbox"
-              type="checkbox"
-              checked={usePixelRendering}
-              onChange={toggleRenderMode}
-            />
-            {' '}Pixel Mode
-          </label>
-        </div>
-
-        <div className="control-wrapper">
-          <label className="selection-label">
-            <input
-              className="control-input checkbox"
-              type="checkbox"
-              checked={useL1Metric}
-              onChange={toggleMetric}
-            />
-            {' '}L1 (fast)
-          </label>
-        </div>
-
-        <div className="control-wrapper">
-          <label
-            className="selection-label"
-            title={webglSupported ? undefined : 'WebGL not supported in this browser'}
-            style={webglSupported ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
-          >
-            <input
-              className="control-input checkbox"
-              type="checkbox"
-              checked={useWebGL && webglSupported}
-              onChange={toggleWebGL}
-              disabled={!webglSupported}
-            />
-            {' '}WebGL{!webglSupported && ' (unsupported)'}
-          </label>
-        </div>
-
-        <div className="control-wrapper speed-control">
-          <label className="control-label">Speed</label>
-          <label className="control-input control-number number">{speed}</label>
-          <input
-            className="control-input control-slider slider"
-            type="range"
-            value={speed}
-            min="1"
-            max="60"
-            step="1"
-            onChange={(e) => setValues({ v: parseInt(e.target.value, 10) })}
-          />
-        </div>
-
-        {isPlaying && (
-          <div className="control-wrapper">
-            <label className="control-label fps-label">{fps} FPS</label>
-          </div>
-        )}
-      </div>
-
-      <div className="canvas-wrapper">
+      <div className="canvas-container">
         <canvas
           className="canvas"
           ref={canvasRef}
@@ -1329,6 +1499,182 @@ export function ImageVoronoi() {
           ref={webglCanvasRef}
           style={{ display: 'none' }}
         />
+      </div>
+
+      <div className="controls-wrapper">
+        {/* Image metadata */}
+        {imageDimensions && (
+          <div className="control-group image-info">
+            <span className="image-meta">
+              {imageFilename && <span className="image-filename">{imageFilename}</span>}
+              <span className="image-dims">{imageDimensions.width}×{imageDimensions.height}</span>
+              <span className="image-pixels">{(imageDimensions.width * imageDimensions.height / 1e6).toFixed(2)}MP</span>
+            </span>
+            {originalDimensions && originalDimensions.width > 400 && (
+              <Tooltip title="Downscale image for better performance" arrow>
+                <select
+                  className="scale-select"
+                  value={imageScale}
+                  onChange={(e) => applyImageScale(parseFloat(e.target.value))}
+                >
+                  {getScaleOptions(originalDimensions.width, originalDimensions.height).map(opt => (
+                    <option key={opt.scale} value={opt.scale}>
+                      {opt.label} ({opt.dims})
+                    </option>
+                  ))}
+                </select>
+              </Tooltip>
+            )}
+          </div>
+        )}
+
+        {/* Playback controls */}
+        <div className="control-group">
+          <Tooltip title="Step backward (<)" arrow>
+            <button className="icon-button" onClick={stepBackward}>
+              <StepBackIcon />
+            </button>
+          </Tooltip>
+          <Tooltip title={isPlaying ? 'Pause (Space)' : 'Play (Space)'} arrow>
+            <button className="icon-button" onClick={togglePlay}>
+              {isPlaying ? <PauseIcon /> : <PlayIcon />}
+            </button>
+          </Tooltip>
+          <Tooltip title="Step forward (>)" arrow>
+            <button className="icon-button" onClick={stepForward}>
+              <StepForwardIcon />
+            </button>
+          </Tooltip>
+          {isPlaying && <span className="fps-display">{fps} fps</span>}
+        </div>
+
+        {/* Sites slider */}
+        <Tooltip title="Number of Voronoi sites" arrow>
+          <div className="control-group slider-group">
+            <label className="control-label">Sites</label>
+            <input
+              className="control-slider"
+              type="range"
+              value={numSites}
+              min={SITES_MIN}
+              max={SITES_MAX}
+              step="25"
+              onChange={handleNumSitesChange}
+            />
+            <span className="control-number sites-display">{sitesDisplay}</span>
+          </div>
+        </Tooltip>
+
+        {/* Speed slider */}
+        <Tooltip title="Animation speed (pixels/sec)" arrow>
+          <div className="control-group slider-group">
+            <label className="control-label">Speed</label>
+            <input
+              className="control-slider"
+              type="range"
+              value={speed}
+              min="1"
+              max="60"
+              step="1"
+              onChange={(e) => setValues({ v: parseInt(e.target.value, 10) })}
+            />
+            <span className="control-number">{speed}</span>
+          </div>
+        </Tooltip>
+
+        {/* 2× Time slider */}
+        <Tooltip title="Doubling time for gradual site changes (0 = instant)" arrow>
+          <div className="control-group slider-group">
+            <label className="control-label">2× Time</label>
+            <input
+              className="control-slider"
+              type="range"
+              value={doublingTime}
+              min="0"
+              max="10"
+              step="0.5"
+              onChange={(e) => setValues({ d: parseFloat(e.target.value) })}
+            />
+            <span className="control-number">{doublingTime > 0 ? `${doublingTime}s` : 'off'}</span>
+          </div>
+        </Tooltip>
+
+        {/* Seed input */}
+        <Tooltip title="Random seed for site placement (F to focus)" arrow>
+          <div className="control-group">
+            <label className="control-label">Seed</label>
+            <input
+              ref={seedInputRef}
+              className="seed-input"
+              type="number"
+              min="0"
+              value={seed}
+              onChange={handleSeedChange}
+            />
+          </div>
+        </Tooltip>
+
+        {/* Checkboxes */}
+        <Tooltip title="Bias initial site placement toward edges" arrow>
+          <label className="selection-label">
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={inversePP}
+              onChange={handleInversePPChange}
+            />
+            {' '}Edge bias
+          </label>
+        </Tooltip>
+
+        <Tooltip title={webglSupported ? 'WebGL acceleration (G)' : 'WebGL not supported'} arrow>
+          <label
+            className="selection-label"
+            style={webglSupported ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
+          >
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={useWebGL && webglSupported}
+              onChange={toggleWebGL}
+              disabled={!webglSupported}
+            />
+            {' '}WebGL
+          </label>
+        </Tooltip>
+
+        <Tooltip title="Show site markers and velocity vectors" arrow>
+          <label className="selection-label">
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={showSites}
+              onChange={() => setShowSites(!showSites)}
+            />
+            {' '}Sites
+          </label>
+        </Tooltip>
+
+        {/* Upload and Download */}
+        <div className="control-group">
+          <Tooltip title="Upload image" arrow>
+            <label className="icon-button">
+              <UploadIcon />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleFileChange}
+                className="file-input"
+              />
+            </label>
+          </Tooltip>
+          <Tooltip title="Download image (S)" arrow>
+            <button className="icon-button" onClick={handleDownload}>
+              <DownloadIcon />
+            </button>
+          </Tooltip>
+        </div>
       </div>
     </div>
   )

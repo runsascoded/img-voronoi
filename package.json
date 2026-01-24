@@ -10,14 +10,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/material": "^7.3.7",
     "file-saver": "^2.0.5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sobel": "^0.0.11",
-    "use-session-storage-state": "^19.0.1",
-    "voronoi": "^1.0.0",
     "use-kbd": "^0.7.0",
-    "use-prms": "^0.3.0"
+    "use-prms": "^0.3.0",
+    "use-session-storage-state": "^19.0.1",
+    "voronoi": "^1.0.0"
   },
   "devDependencies": {
     "@types/file-saver": "^2.0.7",
