@@ -89,19 +89,63 @@ function splitSites(
 }
 
 /**
- * Merge sites to decrease count. Randomly removes sites.
+ * Merge sites to decrease count.
+ * Removes sites that have the closest neighbors to maintain spatial distribution.
  */
 function mergeSites(sites: Position[], targetCount: number): Position[] {
   if (targetCount >= sites.length) return sites
 
-  // Shuffle and take first targetCount
-  const shuffled = [...sites]
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  // For small site counts, use the spatial method
+  // For large reductions, batch process to avoid O(n²) per removal
+  const result = [...sites]
+  const toRemove = result.length - targetCount
+
+  // Build a simple spatial index (grid-based for efficiency)
+  const removeWithSpatialAwareness = (sitesArr: Position[], count: number): Position[] => {
+    if (count <= 0) return sitesArr
+
+    const remaining = [...sitesArr]
+
+    for (let r = 0; r < count && remaining.length > 1; r++) {
+      // Find the site with the closest neighbor (most "redundant")
+      let minDist = Infinity
+      let removeIdx = 0
+
+      // For efficiency, sample if we have many sites
+      const sampleSize = Math.min(remaining.length, 200)
+      const sampleIndices = remaining.length <= 200
+        ? remaining.map((_, i) => i)
+        : Array.from({ length: sampleSize }, () => Math.floor(Math.random() * remaining.length))
+
+      for (const i of sampleIndices) {
+        const site = remaining[i]
+        let closestDist = Infinity
+
+        // Find distance to closest neighbor
+        for (let j = 0; j < remaining.length; j++) {
+          if (i === j) continue
+          const other = remaining[j]
+          const dx = site.x - other.x
+          const dy = site.y - other.y
+          const dist = dx * dx + dy * dy  // squared distance is fine for comparison
+          if (dist < closestDist) {
+            closestDist = dist
+          }
+        }
+
+        if (closestDist < minDist) {
+          minDist = closestDist
+          removeIdx = i
+        }
+      }
+
+      remaining.splice(removeIdx, 1)
+    }
+
+    return remaining
   }
 
-  return shuffled.slice(0, targetCount)
+  return removeWithSpatialAwareness(result, toRemove)
 }
 
 export function ImageVoronoi() {
@@ -1023,22 +1067,37 @@ export function ImageVoronoi() {
           // Parent gets velocity pointing opposite
           velocities[srcIdx] = { x: -divergeX, y: -divergeY }
         } else if (!growing && animatedSites.length > target) {
-          // Merge: remove site with smallest cell area
-          const cellAreas = cellAreasRef.current
+          // Merge: remove site with closest neighbor (maintains spatial distribution)
           let removeIdx = 0
-          if (cellAreas && cellAreas.length === animatedSites.length) {
-            // Find site with minimum area
-            let minArea = cellAreas[0]
-            for (let i = 1; i < cellAreas.length; i++) {
-              if (cellAreas[i] < minArea) {
-                minArea = cellAreas[i]
-                removeIdx = i
+          let minClosestDist = Infinity
+
+          // Sample for efficiency when we have many sites
+          const sampleSize = Math.min(animatedSites.length, 100)
+          const useFullScan = animatedSites.length <= 100
+
+          for (let i = 0; i < (useFullScan ? animatedSites.length : sampleSize); i++) {
+            const idx = useFullScan ? i : Math.floor(Math.random() * animatedSites.length)
+            const site = animatedSites[idx]
+            let closestDist = Infinity
+
+            // Find distance to closest neighbor
+            for (let j = 0; j < animatedSites.length; j++) {
+              if (idx === j) continue
+              const other = animatedSites[j]
+              const dx = site.x - other.x
+              const dy = site.y - other.y
+              const dist = dx * dx + dy * dy
+              if (dist < closestDist) {
+                closestDist = dist
               }
             }
-          } else {
-            // Fallback to random if areas not available
-            removeIdx = Math.floor(Math.random() * animatedSites.length)
+
+            if (closestDist < minClosestDist) {
+              minClosestDist = closestDist
+              removeIdx = idx
+            }
           }
+
           animatedSites.splice(removeIdx, 1)
           velocities.splice(removeIdx, 1)
         }
@@ -1409,6 +1468,20 @@ export function ImageVoronoi() {
     group: 'Sites',
     defaultBindings: ['('],
     handler: () => requestSiteChange(Math.ceil(targetSitesRef.current / PHI)),
+  })
+
+  useAction('voronoi:sites-min', {
+    label: 'Jump to minimum sites',
+    group: 'Sites',
+    defaultBindings: ['meta+ArrowLeft'],
+    handler: () => requestSiteChange(SITES_MIN),
+  })
+
+  useAction('voronoi:sites-max', {
+    label: 'Jump to maximum sites',
+    group: 'Sites',
+    defaultBindings: ['meta+ArrowRight'],
+    handler: () => requestSiteChange(SITES_MAX),
   })
 
   useAction('voronoi:step-forward', {
