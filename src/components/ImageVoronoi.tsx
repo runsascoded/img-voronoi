@@ -1,11 +1,18 @@
 import { useRef, useEffect, useCallback, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
-import { useUrlParams, intParam, boolParam } from 'use-prms/hash'
+import { useUrlParams, intParam, boolParam, Param } from 'use-prms/hash'
 import { useAction } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
+import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
 import sampleImage from '../assets/sample.jpg'
 import './ImageVoronoi.css'
+
+// Boolean param that defaults to true (param absent = true, param present = false)
+const boolParamDefaultTrue: Param<boolean> = {
+  encode: (value: boolean) => value ? undefined : "",
+  decode: (encoded: string | undefined) => encoded === undefined,
+}
 
 type RGB = [number, number, number]
 
@@ -34,12 +41,75 @@ const SITES_MIN = 50
 const SITES_MAX = 10000
 const PHI = 1.618033988749895  // Golden ratio
 
+/**
+ * Split sites to increase count. Randomly selects sites to split,
+ * replacing each with two sites at small offsets from the original.
+ */
+function splitSites(
+  sites: Position[],
+  targetCount: number,
+  width: number,
+  height: number,
+): Position[] {
+  if (targetCount <= sites.length) return sites
+
+  const result = [...sites]
+  const toAdd = targetCount - sites.length
+
+  // Estimate cell radius for offset calculation
+  const avgCellRadius = Math.sqrt((width * height) / sites.length) / 2
+  const splitOffset = avgCellRadius * 0.3  // Split distance
+
+  // Randomly select sites to split
+  const indices = sites.map((_, i) => i)
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]]
+  }
+
+  for (let i = 0; i < toAdd; i++) {
+    const srcIdx = indices[i % indices.length]
+    const src = sites[srcIdx]
+
+    // Random angle for split direction
+    const angle = Math.random() * Math.PI * 2
+
+    // Create new site at offset from source
+    const newSite = {
+      x: Math.max(0, Math.min(width - 1, src.x + Math.cos(angle) * splitOffset)),
+      y: Math.max(0, Math.min(height - 1, src.y + Math.sin(angle) * splitOffset)),
+    }
+    result.push(newSite)
+  }
+
+  return result
+}
+
+/**
+ * Merge sites to decrease count. Randomly removes sites.
+ */
+function mergeSites(sites: Position[], targetCount: number): Position[] {
+  if (targetCount >= sites.length) return sites
+
+  // Shuffle and take first targetCount
+  const shuffled = [...sites]
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
+  }
+
+  return shuffled.slice(0, targetCount)
+}
+
 export function ImageVoronoi() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const webglCanvasRef = useRef<HTMLCanvasElement>(null)
   const voronoiRef = useRef<VoronoiDrawer | null>(null)
+  const webglRef = useRef<VoronoiWebGL | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const seedInputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [webglSupported, setWebglSupported] = useState(true)  // Detect on mount
 
   // Animation state
   const [isPlaying, setIsPlaying] = useState(false)
@@ -49,9 +119,10 @@ export function ImageVoronoi() {
   const animationFrameRef = useRef<number | null>(null)
   const originalImgDataRef = useRef<ImageData | null>(null)
   const animatedSitesRef = useRef<Position[]>([])
-  const velocitiesRef = useRef<Position[]>([])
+  const velocitiesRef = useRef<Position[]>([])  // Unit vectors (magnitude 1)
   const frameCountRef = useRef(0)
   const fpsUpdateTimeRef = useRef(0)
+  const lastFrameTimeRef = useRef(0)  // For delta time calculation
   const animationHistoryRef = useRef<Position[][]>([])
   const historyPositionRef = useRef(0)  // Current position in history (for stepping back)
 
@@ -63,6 +134,7 @@ export function ImageVoronoi() {
   // Refs to track settings for callbacks
   const metricRef = useRef<DistanceMetric>('L2')
   const pixelRenderingRef = useRef(true)
+  const webglRef2 = useRef(false)  // Track useWebGL for callbacks
 
   // Undo/redo history
   const historyRef = useRef<HistoryEntry[]>([])
@@ -74,11 +146,15 @@ export function ImageVoronoi() {
     s: intParam(0),        // seed (default 0, omitted from URL)
     n: intParam(400),      // numSites
     i: boolParam,          // inversePP
+    v: intParam(15),       // speed (velocity, pixels/sec)
+    g: boolParamDefaultTrue,  // WebGL (gpu acceleration, default true)
   })
 
   const seed = values.s
   const numSites = values.n
   const inversePP = values.i
+  const speed = values.v
+  const useWebGL = values.g
 
   // Session storage for large data (image + sites)
   const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
@@ -162,6 +238,46 @@ export function ImageVoronoi() {
     pixelRenderingRef.current = usePixelRendering
   }, [usePixelRendering])
 
+  useEffect(() => {
+    webglRef2.current = useWebGL && webglSupported
+  }, [useWebGL, webglSupported])
+
+  // Detect WebGL support on mount
+  useEffect(() => {
+    const testCanvas = document.createElement('canvas')
+    const gl = testCanvas.getContext('webgl')
+    const ext = gl?.getExtension('ANGLE_instanced_arrays')
+    const supported = !!(gl && ext)
+    setWebglSupported(supported)
+    if (!supported) {
+      console.warn('[WebGL] Not supported - falling back to CPU rendering')
+    }
+  }, [])
+
+  // Helper to ensure WebGL is initialized with correct dimensions
+  const ensureWebGL = useCallback((): VoronoiWebGL | null => {
+    const canvas = canvasRef.current
+    const webglCanvas = webglCanvasRef.current
+    if (!canvas || !webglCanvas) return null
+
+    // Reinitialize if dimensions changed
+    if (!webglRef.current ||
+        webglCanvas.width !== canvas.width ||
+        webglCanvas.height !== canvas.height) {
+      webglCanvas.width = canvas.width
+      webglCanvas.height = canvas.height
+      if (webglRef.current) webglRef.current.dispose()
+      try {
+        webglRef.current = new VoronoiWebGL(webglCanvas)
+        console.log(`[WebGL] initialized ${canvas.width}x${canvas.height}`)
+      } catch (e) {
+        console.warn('[WebGL] initialization failed:', e)
+        webglRef.current = null
+      }
+    }
+    return webglRef.current
+  }, [])
+
   const drawVoronoi = useCallback((
     drawer: VoronoiDrawer,
     seedVal: number,
@@ -169,7 +285,34 @@ export function ImageVoronoi() {
     usePixels: boolean = true,
   ): Position[] => {
     if (usePixels) {
-      // Pixel rendering - also provides cell membership data for hover
+      // Use WebGL if enabled
+      if (webglRef2.current) {
+        const webgl = ensureWebGL()
+        if (webgl) {
+          const t0 = performance.now()
+          // Use existing sites, or get from drawer if count matches, otherwise regenerate
+          const existingOrCached = existingSites || drawer.getSites()
+          const finalSites = existingOrCached.length === drawer.numSites
+            ? existingOrCached
+            : drawer.generateSites(seedVal)
+          const canvas = canvasRef.current
+          if (canvas) {
+            const ctx = canvas.getContext('2d')
+            if (ctx) {
+              const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+              const result = webgl.compute(finalSites, imgData.data)
+              cellOfRef.current = result.cellOf
+              cellColorsRef.current = result.cellColors
+
+              // Draw the result
+              drawer.drawFromCellData(result.cellOf, result.cellColors, finalSites)
+              console.log(`[WebGL] ${(performance.now() - t0).toFixed(1)}ms`)
+            }
+          }
+          return finalSites
+        }
+      }
+      // CPU pixel rendering - also provides cell membership data for hover
       const result = drawer.fillVoronoiPixels(existingSites, seedVal, metricRef.current)
       if (result) {
         cellOfRef.current = result.cellOf
@@ -182,7 +325,7 @@ export function ImageVoronoi() {
       cellColorsRef.current = null
     }
     return drawer.getSites()
-  }, [])
+  }, [ensureWebGL])
 
   const drawImg = useCallback((
     image: HTMLImageElement,
@@ -334,6 +477,99 @@ export function ImageVoronoi() {
     }
   }
 
+  // Scale sites using split/merge to preserve existing site positions
+  const scaleSitesWithSplitMerge = useCallback((targetCount: number) => {
+    const canvas = canvasRef.current
+    const drawer = voronoiRef.current
+    const img = imgRef.current
+    if (!canvas || !drawer || !img) return
+
+    const { width, height } = canvas
+    const currentSites = drawer.getSites()
+
+    // Use split or merge based on direction
+    const newSites = targetCount > currentSites.length
+      ? splitSites(currentSites, targetCount, width, height)
+      : mergeSites(currentSites, targetCount)
+
+    // Update drawer
+    drawer.numSites = targetCount
+
+    // If animating, update animation state
+    if (animatedSitesRef.current.length > 0) {
+      const oldAnimatedSites = animatedSitesRef.current
+      const oldVelocities = velocitiesRef.current
+
+      if (targetCount > oldAnimatedSites.length) {
+        // Splitting: add new sites near existing ones
+        const toAdd = targetCount - oldAnimatedSites.length
+        const newAnimatedSites = [...oldAnimatedSites]
+        const newVelocities = [...oldVelocities]
+
+        const avgCellRadius = Math.sqrt((width * height) / oldAnimatedSites.length) / 2
+        const splitOffset = avgCellRadius * 0.3
+
+        const indices = oldAnimatedSites.map((_, i) => i)
+        for (let i = indices.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [indices[i], indices[j]] = [indices[j], indices[i]]
+        }
+
+        for (let i = 0; i < toAdd; i++) {
+          const srcIdx = indices[i % indices.length]
+          const src = oldAnimatedSites[srcIdx]
+
+          const angle = Math.random() * Math.PI * 2
+          newAnimatedSites.push({
+            x: Math.max(0, Math.min(width - 1, src.x + Math.cos(angle) * splitOffset)),
+            y: Math.max(0, Math.min(height - 1, src.y + Math.sin(angle) * splitOffset)),
+          })
+          // New site gets similar velocity with slight variation
+          const velAngle = Math.random() * Math.PI * 2
+          newVelocities.push({
+            x: Math.cos(velAngle),
+            y: Math.sin(velAngle),
+          })
+        }
+
+        animatedSitesRef.current = newAnimatedSites
+        velocitiesRef.current = newVelocities
+      } else {
+        // Merging: remove random sites
+        const shuffledIndices = oldAnimatedSites.map((_, i) => i)
+        for (let i = shuffledIndices.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffledIndices[i], shuffledIndices[j]] = [shuffledIndices[j], shuffledIndices[i]]
+        }
+        const keepIndices = new Set(shuffledIndices.slice(0, targetCount))
+
+        animatedSitesRef.current = oldAnimatedSites.filter((_, i) => keepIndices.has(i))
+        velocitiesRef.current = oldVelocities.filter((_, i) => keepIndices.has(i))
+      }
+
+      // Clear animation history since sites changed
+      animationHistoryRef.current = [animatedSitesRef.current.map(s => ({ ...s }))]
+      historyPositionRef.current = 0
+    }
+
+    // Draw with the new sites
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      ctx.drawImage(img, 0, 0)
+      originalImgDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    }
+
+    // Use animated sites if available, otherwise the split/merged sites
+    const sitesToDraw = animatedSitesRef.current.length > 0
+      ? animatedSitesRef.current
+      : newSites
+    drawVoronoi(drawer, seed, sitesToDraw, pixelRenderingRef.current)
+
+    setValues({ n: targetCount })
+    setImageState(prev => ({ ...prev, sites: sitesToDraw }))
+    pushHistory({ imageDataUrl, sites: sitesToDraw, seed, numSites: targetCount, inversePP })
+  }, [seed, inversePP, imageDataUrl, setValues, setImageState, pushHistory, drawVoronoi])
+
   const handleInversePPChange = () => {
     toggleInversePP()
   }
@@ -409,10 +645,11 @@ export function ImageVoronoi() {
     // Use the drawer's actual sites (not React state which might be stale)
     const currentSites = drawer.getSites()
     animatedSitesRef.current = currentSites.map(s => ({ ...s }))
-    velocitiesRef.current = currentSites.map(() => ({
-      x: (Math.random() - 0.5) * 2,
-      y: (Math.random() - 0.5) * 2,
-    }))
+    // Create unit velocity vectors (random direction, magnitude 1)
+    velocitiesRef.current = currentSites.map(() => {
+      const angle = Math.random() * Math.PI * 2
+      return { x: Math.cos(angle), y: Math.sin(angle) }
+    })
 
     // Initialize history with current state
     animationHistoryRef.current = [currentSites.map(s => ({ ...s }))]
@@ -432,6 +669,19 @@ export function ImageVoronoi() {
     ctx.putImageData(originalImgData, 0, 0)
 
     if (pixelRenderingRef.current) {
+      // Use WebGL if enabled
+      if (webglRef2.current) {
+        const webgl = ensureWebGL()
+        if (webgl) {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+          const result = webgl.compute(sites, imgData.data)
+          cellOfRef.current = result.cellOf
+          cellColorsRef.current = result.cellColors
+          drawer.drawFromCellData(result.cellOf, result.cellColors, sites)
+          return
+        }
+      }
+      // Fall back to CPU
       const result = drawer.fillVoronoiPixels(sites, undefined, metricRef.current)
       if (result) {
         cellOfRef.current = result.cellOf
@@ -440,7 +690,7 @@ export function ImageVoronoi() {
     } else {
       drawer.fillVoronoi(sites)
     }
-  }, [])
+  }, [ensureWebGL])
 
   const animationStep = useCallback((saveToHistory = true) => {
     const canvas = canvasRef.current
@@ -455,10 +705,20 @@ export function ImageVoronoi() {
     const animatedSites = animatedSitesRef.current
     const velocities = velocitiesRef.current
 
+    // Calculate delta time for frame-rate independent movement
+    const now = performance.now()
+    const deltaTime = lastFrameTimeRef.current > 0
+      ? (now - lastFrameTimeRef.current) / 1000  // Convert to seconds
+      : 1 / 60  // Default to ~60fps for first frame
+    lastFrameTimeRef.current = now
+
+    // Movement amount: speed (pixels/sec) * deltaTime (sec) = pixels
+    const movement = speed * deltaTime
+
     // Move sites
     for (let i = 0; i < animatedSites.length; i++) {
-      animatedSites[i].x += velocities[i].x
-      animatedSites[i].y += velocities[i].y
+      animatedSites[i].x += velocities[i].x * movement
+      animatedSites[i].y += velocities[i].y * movement
 
       // Bounce off edges
       if (animatedSites[i].x < 0 || animatedSites[i].x >= width) {
@@ -497,24 +757,43 @@ export function ImageVoronoi() {
 
     // Re-render Voronoi
     if (usePixelRendering) {
-      const result = drawer.fillVoronoiPixels(animatedSites, undefined, metricRef.current)
-      if (result) {
-        cellOfRef.current = result.cellOf
-        cellColorsRef.current = result.cellColors
+      // Use WebGL if enabled
+      if (webglRef2.current) {
+        const webgl = ensureWebGL()
+        if (webgl) {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+          const result = webgl.compute(animatedSites, imgData.data)
+          cellOfRef.current = result.cellOf
+          cellColorsRef.current = result.cellColors
+          drawer.drawFromCellData(result.cellOf, result.cellColors, animatedSites)
+        } else {
+          // Fall back to CPU if WebGL failed
+          const result = drawer.fillVoronoiPixels(animatedSites, undefined, metricRef.current)
+          if (result) {
+            cellOfRef.current = result.cellOf
+            cellColorsRef.current = result.cellColors
+          }
+        }
+      } else {
+        const result = drawer.fillVoronoiPixels(animatedSites, undefined, metricRef.current)
+        if (result) {
+          cellOfRef.current = result.cellOf
+          cellColorsRef.current = result.cellColors
+        }
       }
     } else {
       drawer.fillVoronoi(animatedSites)
     }
 
-    // Update FPS
+    // Update FPS (reuse `now` from delta time calculation above)
     frameCountRef.current++
-    const now = performance.now()
-    if (now - fpsUpdateTimeRef.current >= 1000) {
-      setFps(Math.round(frameCountRef.current * 1000 / (now - fpsUpdateTimeRef.current)))
+    const fpsNow = performance.now()
+    if (fpsNow - fpsUpdateTimeRef.current >= 1000) {
+      setFps(Math.round(frameCountRef.current * 1000 / (fpsNow - fpsUpdateTimeRef.current)))
       frameCountRef.current = 0
-      fpsUpdateTimeRef.current = now
+      fpsUpdateTimeRef.current = fpsNow
     }
-  }, [usePixelRendering, getMaxHistoryFrames])
+  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed])
 
   const animate = useCallback(() => {
     animationStep()
@@ -534,6 +813,7 @@ export function ImageVoronoi() {
       // Start
       initializeAnimation()
       fpsUpdateTimeRef.current = performance.now()
+      lastFrameTimeRef.current = 0  // Reset for proper delta time on first frame
       frameCountRef.current = 0
       setIsPlaying(true)
       animationFrameRef.current = requestAnimationFrame(animate)
@@ -735,6 +1015,16 @@ export function ImageVoronoi() {
     }
   }, [])
 
+  // Cleanup WebGL on unmount
+  useEffect(() => {
+    return () => {
+      if (webglRef.current) {
+        webglRef.current.dispose()
+        webglRef.current = null
+      }
+    }
+  }, [])
+
   // Keyboard shortcuts
   useAction('voronoi:undo', {
     label: 'Undo',
@@ -807,17 +1097,17 @@ export function ImageVoronoi() {
   })
 
   useAction('voronoi:golden-up', {
-    label: 'Scale sites up (×φ)',
+    label: 'Scale sites up (×φ) with split',
     group: 'Sites',
     defaultBindings: [')'],
-    handler: () => updateNumSites(Math.min(SITES_MAX, Math.floor(numSites * PHI))),
+    handler: () => scaleSitesWithSplitMerge(Math.min(SITES_MAX, Math.floor(numSites * PHI))),
   })
 
   useAction('voronoi:golden-down', {
-    label: 'Scale sites down (÷φ)',
+    label: 'Scale sites down (÷φ) with merge',
     group: 'Sites',
     defaultBindings: ['('],
-    handler: () => updateNumSites(Math.max(SITES_MIN, Math.ceil(numSites / PHI))),
+    handler: () => scaleSitesWithSplitMerge(Math.max(SITES_MIN, Math.ceil(numSites / PHI))),
   })
 
   useAction('voronoi:step-forward', {
@@ -869,6 +1159,30 @@ export function ImageVoronoi() {
     group: 'Voronoi',
     defaultBindings: ['m'],
     handler: toggleMetric,
+  })
+
+  const toggleWebGL = useCallback(() => {
+    if (!webglSupported) return
+    const newValue = !useWebGL
+    webglRef2.current = newValue && webglSupported
+    setValues({ g: newValue })
+    // Re-render with the new mode
+    if (imgRef.current && voronoiRef.current) {
+      const canvas = canvasRef.current
+      const ctx = canvas?.getContext('2d')
+      if (canvas && ctx) {
+        ctx.drawImage(imgRef.current, 0, 0)
+        originalImgDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
+      }
+    }
+  }, [seed, drawVoronoi, useWebGL, webglSupported, setValues])
+
+  useAction('voronoi:toggle-webgl', {
+    label: 'Toggle WebGL acceleration',
+    group: 'Voronoi',
+    defaultBindings: ['g'],
+    handler: toggleWebGL,
   })
 
   return (
@@ -965,6 +1279,37 @@ export function ImageVoronoi() {
           </label>
         </div>
 
+        <div className="control-wrapper">
+          <label
+            className="selection-label"
+            title={webglSupported ? undefined : 'WebGL not supported in this browser'}
+            style={webglSupported ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
+          >
+            <input
+              className="control-input checkbox"
+              type="checkbox"
+              checked={useWebGL && webglSupported}
+              onChange={toggleWebGL}
+              disabled={!webglSupported}
+            />
+            {' '}WebGL{!webglSupported && ' (unsupported)'}
+          </label>
+        </div>
+
+        <div className="control-wrapper speed-control">
+          <label className="control-label">Speed</label>
+          <label className="control-input control-number number">{speed}</label>
+          <input
+            className="control-input control-slider slider"
+            type="range"
+            value={speed}
+            min="1"
+            max="60"
+            step="1"
+            onChange={(e) => setValues({ v: parseInt(e.target.value, 10) })}
+          />
+        </div>
+
         {isPlaying && (
           <div className="control-wrapper">
             <label className="control-label fps-label">{fps} FPS</label>
@@ -978,6 +1323,11 @@ export function ImageVoronoi() {
           ref={canvasRef}
           onMouseMove={handleCanvasMouseMove}
           onMouseLeave={handleCanvasMouseLeave}
+        />
+        {/* Hidden canvas for WebGL rendering */}
+        <canvas
+          ref={webglCanvasRef}
+          style={{ display: 'none' }}
         />
       </div>
     </div>

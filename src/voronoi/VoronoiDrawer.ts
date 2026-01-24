@@ -113,7 +113,7 @@ export class VoronoiDrawer {
     return this.currentSeed
   }
 
-  private generateSites(seed?: number): Position[] {
+  generateSites(seed?: number): Position[] {
     this.currentSeed = seed ?? randomSeed()
     const random = createSeededRandom(this.currentSeed)
 
@@ -546,6 +546,33 @@ export class VoronoiDrawer {
       ctx.stroke()
       ctx.fill()
     }
+  }
+
+  /**
+   * Draw pixels from pre-computed cell assignments and colors.
+   * Used when cell computation is done externally (e.g., WebGL).
+   */
+  drawFromCellData(cellOf: Int32Array, cellColors: RGB[], sites: Position[]): void {
+    const ctx = this.canvas.getContext('2d')
+    if (!ctx) return
+
+    const imgdata = ctx.getImageData(0, 0, this.width, this.height)
+    const pixels = imgdata.data
+    const numPixels = this.width * this.height
+
+    for (let i = 0; i < numPixels; i++) {
+      const cell = cellOf[i]
+      if (cell >= 0 && cell < cellColors.length) {
+        const color = cellColors[cell]
+        const px = i * 4
+        pixels[px] = color[0]
+        pixels[px + 1] = color[1]
+        pixels[px + 2] = color[2]
+      }
+    }
+
+    ctx.putImageData(imgdata, 0, 0)
+    this.sites = sites
   }
 
   /**
