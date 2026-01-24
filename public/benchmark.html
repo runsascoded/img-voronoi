@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Voronoi Benchmark</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #eee; }
+    canvas { display: none; }
+    pre { background: #2a2a2a; padding: 15px; border-radius: 5px; overflow-x: auto; }
+    button { padding: 10px 20px; font-size: 16px; margin: 10px 0; cursor: pointer; }
+    .result { margin: 5px 0; }
+    .fast { color: #4f4; }
+    .medium { color: #ff4; }
+    .slow { color: #f44; }
+  </style>
+</head>
+<body>
+  <h1>Voronoi Benchmark: CPU vs WebGL</h1>
+  <button onclick="runBenchmark()">Run Benchmark</button>
+  <pre id="output">Click "Run Benchmark" to start...</pre>
+
+  <canvas id="canvas" width="1024" height="682"></canvas>
+  <canvas id="glCanvas" width="1024" height="682"></canvas>
+
+  <script type="module">
+    // Inline the algorithms for benchmarking
+
+    // ===== BucketQueue for CPU L2 =====
+    class BucketQueue {
+      constructor(maxDistSq) {
+        this.maxBucket = maxDistSq;
+        this.buckets = new Array(maxDistSq + 1);
+        this.bucketSizes = new Int32Array(maxDistSq + 1);
+        this.currentBucket = 0;
+        this._size = 0;
+      }
+
+      push(priority, pixelIndex, siteIndex) {
+        const bucket = Math.min(priority | 0, this.maxBucket);
+        if (!this.buckets[bucket]) {
+          this.buckets[bucket] = new Int32Array(64);
+        }
+        let arr = this.buckets[bucket];
+        const size = this.bucketSizes[bucket];
+        if (size * 2 >= arr.length) {
+          const newArr = new Int32Array(arr.length * 2);
+          newArr.set(arr);
+          this.buckets[bucket] = newArr;
+          arr = newArr;
+        }
+        arr[size * 2] = pixelIndex;
+        arr[size * 2 + 1] = siteIndex;
+        this.bucketSizes[bucket] = size + 1;
+        this._size++;
+      }
+
+      pop(result) {
+        while (this.currentBucket <= this.maxBucket) {
+          const size = this.bucketSizes[this.currentBucket];
+          if (size > 0) {
+            const arr = this.buckets[this.currentBucket];
+            const newSize = size - 1;
+            result.pixel = arr[newSize * 2];
+            result.site = arr[newSize * 2 + 1];
+            this.bucketSizes[this.currentBucket] = newSize;
+            this._size--;
+            return true;
+          }
+          this.currentBucket++;
+        }
+        return false;
+      }
+    }
+
+    // ===== CPU L2 Flood Fill =====
+    function cpuFloodFillL2(width, height, sites, imgdata) {
+      const numPixels = width * height;
+      const numSites = sites.length;
+
+      const cellOf = new Int32Array(numPixels).fill(-1);
+      const bestDist = new Float32Array(numPixels).fill(Infinity);
+      const rSum = new Float64Array(numSites);
+      const gSum = new Float64Array(numSites);
+      const bSum = new Float64Array(numSites);
+      const counts = new Uint32Array(numSites);
+
+      const maxDistSq = width * width + height * height;
+      const queue = new BucketQueue(maxDistSq);
+      const popResult = { pixel: 0, site: 0 };
+
+      for (let i = 0; i < numSites; i++) {
+        const sx = sites[i].x;
+        const sy = sites[i].y;
+        const x = sx | 0;
+        const y = sy | 0;
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+          const idx = y * width + x;
+          const dx = x + 0.5 - sx;
+          const dy = y + 0.5 - sy;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < bestDist[idx]) {
+            bestDist[idx] = distSq;
+            queue.push(distSq, idx, i);
+          }
+        }
+      }
+
+      while (queue.pop(popResult)) {
+        const idx = popResult.pixel;
+        const siteIdx = popResult.site;
+
+        if (cellOf[idx] !== -1) continue;
+        cellOf[idx] = siteIdx;
+
+        const px = idx * 4;
+        rSum[siteIdx] += imgdata[px];
+        gSum[siteIdx] += imgdata[px + 1];
+        bSum[siteIdx] += imgdata[px + 2];
+        counts[siteIdx]++;
+
+        const x = idx % width;
+        const y = ((idx - x) / width) | 0;
+        const site = sites[siteIdx];
+        const sx = site.x;
+        const sy = site.y;
+        const pcx = x + 0.5 - sx;
+        const pcy = y + 0.5 - sy;
+
+        if (x + 1 < width) {
+          const nidx = idx + 1;
+          if (cellOf[nidx] === -1) {
+            const pdx = pcx + 1;
+            const distSq = pdx * pdx + pcy * pcy;
+            if (distSq < bestDist[nidx]) {
+              bestDist[nidx] = distSq;
+              queue.push(distSq, nidx, siteIdx);
+            }
+          }
+        }
+        if (x > 0) {
+          const nidx = idx - 1;
+          if (cellOf[nidx] === -1) {
+            const pdx = pcx - 1;
+            const distSq = pdx * pdx + pcy * pcy;
+            if (distSq < bestDist[nidx]) {
+              bestDist[nidx] = distSq;
+              queue.push(distSq, nidx, siteIdx);
+            }
+          }
+        }
+        if (y + 1 < height) {
+          const nidx = idx + width;
+          if (cellOf[nidx] === -1) {
+            const pdy = pcy + 1;
+            const distSq = pcx * pcx + pdy * pdy;
+            if (distSq < bestDist[nidx]) {
+              bestDist[nidx] = distSq;
+              queue.push(distSq, nidx, siteIdx);
+            }
+          }
+        }
+        if (y > 0) {
+          const nidx = idx - width;
+          if (cellOf[nidx] === -1) {
+            const pdy = pcy - 1;
+            const distSq = pcx * pcx + pdy * pdy;
+            if (distSq < bestDist[nidx]) {
+              bestDist[nidx] = distSq;
+              queue.push(distSq, nidx, siteIdx);
+            }
+          }
+        }
+      }
+
+      const cellColors = new Array(numSites);
+      for (let i = 0; i < numSites; i++) {
+        const count = counts[i];
+        if (count > 0) {
+          cellColors[i] = [(rSum[i] / count) | 0, (gSum[i] / count) | 0, (bSum[i] / count) | 0];
+        } else {
+          cellColors[i] = [128, 128, 128];
+        }
+      }
+
+      return { cellOf, cellColors };
+    }
+
+    // ===== WebGL Voronoi =====
+    const CONE_SEGMENTS = 64;
+
+    const VERTEX_SHADER = `
+      attribute vec2 a_coneVertex;
+      attribute float a_coneZ;
+      attribute vec2 a_sitePos;
+      attribute float a_siteIndex;
+      uniform vec2 u_resolution;
+      uniform float u_coneHeight;
+      varying float v_siteIndex;
+      void main() {
+        float radius = a_coneZ * u_coneHeight;
+        vec2 pos = a_sitePos + a_coneVertex * radius;
+        vec2 clipPos = (pos / u_resolution) * 2.0 - 1.0;
+        gl_Position = vec4(clipPos.x, -clipPos.y, a_coneZ, 1.0);
+        v_siteIndex = a_siteIndex;
+      }
+    `;
+
+    const FRAGMENT_SHADER = `
+      precision highp float;
+      varying float v_siteIndex;
+      void main() {
+        float idx = v_siteIndex;
+        float r = mod(idx, 256.0);
+        float g = mod(floor(idx / 256.0), 256.0);
+        float b = mod(floor(idx / 65536.0), 256.0);
+        gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+      }
+    `;
+
+    class VoronoiWebGL {
+      constructor(canvas) {
+        const gl = canvas.getContext('webgl', { antialias: false, depth: true, preserveDrawingBuffer: true });
+        if (!gl) throw new Error('WebGL not supported');
+        this.gl = gl;
+        this.width = canvas.width;
+        this.height = canvas.height;
+
+        const ext = gl.getExtension('ANGLE_instanced_arrays');
+        if (!ext) throw new Error('ANGLE_instanced_arrays not supported');
+        this.ext = ext;
+
+        // Create shaders
+        const vs = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vs, VERTEX_SHADER);
+        gl.compileShader(vs);
+
+        const fs = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fs, FRAGMENT_SHADER);
+        gl.compileShader(fs);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vs);
+        gl.attachShader(program, fs);
+        gl.linkProgram(program);
+        this.program = program;
+
+        // Locations
+        this.a_coneVertex = gl.getAttribLocation(program, 'a_coneVertex');
+        this.a_coneZ = gl.getAttribLocation(program, 'a_coneZ');
+        this.a_sitePos = gl.getAttribLocation(program, 'a_sitePos');
+        this.a_siteIndex = gl.getAttribLocation(program, 'a_siteIndex');
+        this.u_resolution = gl.getUniformLocation(program, 'u_resolution');
+        this.u_coneHeight = gl.getUniformLocation(program, 'u_coneHeight');
+
+        // Cone geometry
+        const numVertices = CONE_SEGMENTS + 2;
+        const vertices = new Float32Array(numVertices * 2);
+        const zCoords = new Float32Array(numVertices);
+        vertices[0] = 0; vertices[1] = 0; zCoords[0] = 0;
+        for (let i = 0; i <= CONE_SEGMENTS; i++) {
+          const angle = (i / CONE_SEGMENTS) * Math.PI * 2;
+          vertices[(i + 1) * 2] = Math.cos(angle);
+          vertices[(i + 1) * 2 + 1] = Math.sin(angle);
+          zCoords[i + 1] = 1.0;
+        }
+        this.coneVertexCount = numVertices;
+
+        // Buffers
+        this.coneVertexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.coneVertexBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+        this.coneZBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.coneZBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, zCoords, gl.STATIC_DRAW);
+
+        this.sitePosBuffer = gl.createBuffer();
+        this.siteIndexBuffer = gl.createBuffer();
+
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
+        gl.viewport(0, 0, this.width, this.height);
+      }
+
+      computeCells(sites) {
+        const { gl, ext } = this;
+        const numSites = sites.length;
+
+        const sitePositions = new Float32Array(numSites * 2);
+        const siteIndices = new Float32Array(numSites);
+        for (let i = 0; i < numSites; i++) {
+          sitePositions[i * 2] = sites[i].x;
+          sitePositions[i * 2 + 1] = sites[i].y;
+          siteIndices[i] = i;
+        }
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.sitePosBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, sitePositions, gl.DYNAMIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.siteIndexBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, siteIndices, gl.DYNAMIC_DRAW);
+
+        gl.clearColor(0, 0, 0, 1);
+        gl.clearDepth(1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        gl.useProgram(this.program);
+        gl.uniform2f(this.u_resolution, this.width, this.height);
+        gl.uniform1f(this.u_coneHeight, Math.sqrt(this.width * this.width + this.height * this.height));
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.coneVertexBuffer);
+        gl.enableVertexAttribArray(this.a_coneVertex);
+        gl.vertexAttribPointer(this.a_coneVertex, 2, gl.FLOAT, false, 0, 0);
+        ext.vertexAttribDivisorANGLE(this.a_coneVertex, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.coneZBuffer);
+        gl.enableVertexAttribArray(this.a_coneZ);
+        gl.vertexAttribPointer(this.a_coneZ, 1, gl.FLOAT, false, 0, 0);
+        ext.vertexAttribDivisorANGLE(this.a_coneZ, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.sitePosBuffer);
+        gl.enableVertexAttribArray(this.a_sitePos);
+        gl.vertexAttribPointer(this.a_sitePos, 2, gl.FLOAT, false, 0, 0);
+        ext.vertexAttribDivisorANGLE(this.a_sitePos, 1);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.siteIndexBuffer);
+        gl.enableVertexAttribArray(this.a_siteIndex);
+        gl.vertexAttribPointer(this.a_siteIndex, 1, gl.FLOAT, false, 0, 0);
+        ext.vertexAttribDivisorANGLE(this.a_siteIndex, 1);
+
+        ext.drawArraysInstancedANGLE(gl.TRIANGLE_FAN, 0, this.coneVertexCount, numSites);
+
+        const pixels = new Uint8Array(this.width * this.height * 4);
+        gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+
+        const cellOf = new Int32Array(this.width * this.height);
+        for (let i = 0; i < cellOf.length; i++) {
+          const flippedI = ((this.height - 1 - Math.floor(i / this.width)) * this.width) + (i % this.width);
+          const px = flippedI * 4;
+          cellOf[i] = pixels[px] + pixels[px + 1] * 256 + pixels[px + 2] * 65536;
+        }
+
+        return cellOf;
+      }
+
+      computeColors(cellOf, imgdata, numSites) {
+        const rSum = new Float64Array(numSites);
+        const gSum = new Float64Array(numSites);
+        const bSum = new Float64Array(numSites);
+        const counts = new Uint32Array(numSites);
+
+        for (let i = 0; i < cellOf.length; i++) {
+          const cell = cellOf[i];
+          if (cell >= 0 && cell < numSites) {
+            const px = i * 4;
+            rSum[cell] += imgdata[px];
+            gSum[cell] += imgdata[px + 1];
+            bSum[cell] += imgdata[px + 2];
+            counts[cell]++;
+          }
+        }
+
+        const cellColors = new Array(numSites);
+        for (let i = 0; i < numSites; i++) {
+          const count = counts[i];
+          cellColors[i] = count > 0
+            ? [(rSum[i] / count) | 0, (gSum[i] / count) | 0, (bSum[i] / count) | 0]
+            : [128, 128, 128];
+        }
+
+        return cellColors;
+      }
+
+      compute(sites, imgdata) {
+        const cellOf = this.computeCells(sites);
+        const cellColors = this.computeColors(cellOf, imgdata, sites.length);
+        return { cellOf, cellColors };
+      }
+    }
+
+    // ===== Benchmark =====
+    function generateSites(width, height, count) {
+      const sites = [];
+      for (let i = 0; i < count; i++) {
+        sites.push({ x: Math.random() * width, y: Math.random() * height });
+      }
+      return sites;
+    }
+
+    function generateImageData(width, height) {
+      const data = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = Math.random() * 256 | 0;
+        data[i + 1] = Math.random() * 256 | 0;
+        data[i + 2] = Math.random() * 256 | 0;
+        data[i + 3] = 255;
+      }
+      return data;
+    }
+
+    function benchmarkMin(fn, iterations = 5) {
+      for (let i = 0; i < 2; i++) fn();  // Warmup
+      let min = Infinity;
+      for (let i = 0; i < iterations; i++) {
+        const start = performance.now();
+        fn();
+        min = Math.min(min, performance.now() - start);
+      }
+      return min;
+    }
+
+    function colorClass(ms, thresholds = [16, 50]) {
+      if (ms < thresholds[0]) return 'fast';
+      if (ms < thresholds[1]) return 'medium';
+      return 'slow';
+    }
+
+    window.runBenchmark = async function() {
+      const output = document.getElementById('output');
+      output.textContent = 'Running benchmark...\n\n';
+
+      const glCanvas = document.getElementById('glCanvas');
+      let webgl;
+      try {
+        webgl = new VoronoiWebGL(glCanvas);
+        output.textContent += 'WebGL initialized successfully\n\n';
+      } catch (e) {
+        output.textContent += `WebGL error: ${e.message}\n\n`;
+        return;
+      }
+
+      const width = 1024;
+      const height = 682;
+      const imgdata = generateImageData(width, height);
+
+      output.textContent += `Image: ${width}x${height} (${(width * height / 1e6).toFixed(2)}M pixels)\n\n`;
+      output.textContent += 'Sites |   CPU L2 |   WebGL | Speedup\n';
+      output.textContent += '------|----------|---------|--------\n';
+
+      for (const numSites of [100, 200, 400, 800, 1600]) {
+        const sites = generateSites(width, height, numSites);
+
+        const cpuTime = benchmarkMin(() => cpuFloodFillL2(width, height, sites, imgdata));
+        const glTime = benchmarkMin(() => webgl.compute(sites, imgdata));
+        const speedup = cpuTime / glTime;
+
+        const row = `${numSites.toString().padStart(5)} | ${cpuTime.toFixed(1).padStart(8)}ms | ${glTime.toFixed(1).padStart(7)}ms | ${speedup.toFixed(1).padStart(6)}x\n`;
+        output.textContent += row;
+      }
+
+      output.textContent += '\n\nBreakdown for 400 sites:\n';
+      const sites400 = generateSites(width, height, 400);
+
+      // CPU breakdown
+      const cpuTotal = benchmarkMin(() => cpuFloodFillL2(width, height, sites400, imgdata));
+      output.textContent += `CPU L2 total: ${cpuTotal.toFixed(1)}ms\n`;
+
+      // WebGL breakdown
+      let cellOf;
+      const glCells = benchmarkMin(() => { cellOf = webgl.computeCells(sites400); });
+      const glColors = benchmarkMin(() => webgl.computeColors(cellOf, imgdata, 400));
+      output.textContent += `WebGL cells:  ${glCells.toFixed(1)}ms (GPU render + readback)\n`;
+      output.textContent += `WebGL colors: ${glColors.toFixed(1)}ms (CPU averaging)\n`;
+      output.textContent += `WebGL total:  ${(glCells + glColors).toFixed(1)}ms\n`;
+    };
+  </script>
+</body>
+</html>
