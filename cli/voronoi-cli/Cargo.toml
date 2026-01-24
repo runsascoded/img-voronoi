@@ -1,0 +1,36 @@
+[package]
+name = "voronoi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for rendering Voronoi animations"
+
+[[bin]]
+name = "voronoi"
+path = "src/main.rs"
+
+[dependencies]
+voronoi-core = { path = "../voronoi-core", features = ["cpu"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Image/video encoding
+image = "0.25"
+gif = "0.13"
+
+# Progress
+indicatif = "0.17"
+
+# FFmpeg binding for video encoding (not used directly for now)
+# ffmpeg-next = "7"
+
+# Error handling
+anyhow = "1"
+
+# Temp files for ffmpeg
+tempfile = "3"
+
+[features]
+default = []
+gpu = ["voronoi-core/gpu"]
