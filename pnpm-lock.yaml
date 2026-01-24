@@ -21,8 +21,8 @@ importers:
         specifier: ^0.0.11
         version: 0.0.11
       use-kbd:
-        specifier: github:runsascoded/use-kbd#92ce7307f1773cb96407ff305ec198329ee643c9
-        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/92ce7307f1773cb96407ff305ec198329ee643c9(react@18.3.1)
+        specifier: ^0.7.0
+        version: 0.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-prms:
         specifier: ^0.3.0
         version: 0.3.0(react@18.3.1)
@@ -1910,11 +1910,11 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/92ce7307f1773cb96407ff305ec198329ee643c9:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/92ce7307f1773cb96407ff305ec198329ee643c9}
-    version: 0.7.0-dist.1fecd26
+  use-kbd@0.7.0:
+    resolution: {integrity: sha512-DHkeefDiM3yhAVtiWPalSRsl6TJi5uy4Nh/++Vr2zd+emaJ7gzMTEzUKhsvAx/nWCBfxqqf7GCoVWSjFudpw5g==}
     peerDependencies:
       react: '>=18.0.0'
+      react-dom: '>=18.0.0'
 
   use-prms@0.3.0:
     resolution: {integrity: sha512-DtCS0AspqUSvHIHduNv/87cn7f6PYiLyInA+azEftwaFPd9g8Yoi4S2rdnxOcYxsJzwZD4Aie0LHVyRKBa+tXA==}
@@ -3936,9 +3936,10 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/92ce7307f1773cb96407ff305ec198329ee643c9(react@18.3.1):
+  use-kbd@0.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:
       react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
 
   use-prms@0.3.0(react@18.3.1):
     optionalDependencies:

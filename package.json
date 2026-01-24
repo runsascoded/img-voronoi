@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "clean": "rm -rf dist node_modules/.vite",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -15,7 +16,7 @@
     "sobel": "^0.0.11",
     "use-session-storage-state": "^19.0.1",
     "voronoi": "^1.0.0",
-    "use-kbd": "github:runsascoded/use-kbd#92ce7307f1773cb96407ff305ec198329ee643c9",
+    "use-kbd": "^0.7.0",
     "use-prms": "^0.3.0"
   },
   "devDependencies": {
