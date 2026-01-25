@@ -1,5 +1,9 @@
 //! Site and position types for Voronoi computation.
 
+use rand::Rng;
+use rand_chacha::ChaCha8Rng;
+use rand::SeedableRng;
+
 /// 2D position
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Position {
@@ -46,9 +50,9 @@ impl Velocity {
     }
 
     /// Create random unit velocity
-    pub fn random() -> Self {
+    pub fn random(rng: &mut impl Rng) -> Self {
         use std::f64::consts::TAU;
-        Self::from_angle(rand::random::<f64>() * TAU)
+        Self::from_angle(rng.gen::<f64>() * TAU)
     }
 
     /// Reflect off horizontal boundary
@@ -75,10 +79,10 @@ impl Site {
     }
 
     /// Create with random velocity
-    pub fn with_random_velocity(pos: Position) -> Self {
+    pub fn with_random_velocity(pos: Position, rng: &mut impl Rng) -> Self {
         Self {
             pos,
-            vel: Velocity::random(),
+            vel: Velocity::random(rng),
         }
     }
 
@@ -101,8 +105,8 @@ impl Site {
     }
 
     /// Split into two sites moving in opposite directions
-    pub fn split(&self) -> (Site, Site) {
-        let angle = rand::random::<f64>() * std::f64::consts::TAU;
+    pub fn split(&self, rng: &mut impl Rng) -> (Site, Site) {
+        let angle = rng.gen::<f64>() * std::f64::consts::TAU;
         let vel1 = Velocity::from_angle(angle);
         let vel2 = Velocity::from_angle(angle + std::f64::consts::PI);
 
@@ -113,33 +117,40 @@ impl Site {
     }
 }
 
-/// Collection of sites with physics simulation
+/// Collection of sites with physics simulation and seeded RNG
 #[derive(Debug, Clone)]
 pub struct SiteCollection {
     pub sites: Vec<Site>,
     pub fractional_sites: f64,  // Accumulated fractional sites for gradual growth
+    rng: ChaCha8Rng,
 }
 
 impl SiteCollection {
-    pub fn new(sites: Vec<Site>) -> Self {
+    pub fn new(sites: Vec<Site>, seed: u64) -> Self {
         Self {
             sites,
             fractional_sites: 0.0,
+            rng: ChaCha8Rng::seed_from_u64(seed),
         }
     }
 
     /// Create sites at random positions with random velocities
-    pub fn random(count: usize, width: f64, height: f64) -> Self {
+    pub fn random(count: usize, width: f64, height: f64, seed: u64) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let sites = (0..count)
             .map(|_| {
                 let pos = Position::new(
-                    rand::random::<f64>() * width,
-                    rand::random::<f64>() * height,
+                    rng.gen::<f64>() * width,
+                    rng.gen::<f64>() * height,
                 );
-                Site::with_random_velocity(pos)
+                Site::with_random_velocity(pos, &mut rng)
             })
             .collect();
-        Self::new(sites)
+        Self {
+            sites,
+            fractional_sites: 0.0,
+            rng,
+        }
     }
 
     /// Step all sites forward
@@ -188,10 +199,10 @@ impl SiteCollection {
                         .map(|(i, _)| i)
                         .unwrap_or(0)
                 } else {
-                    (rand::random::<f64>() * self.sites.len() as f64) as usize
+                    self.rng.gen_range(0..self.sites.len())
                 };
 
-                let (site1, site2) = self.sites[src_idx].split();
+                let (site1, site2) = self.sites[src_idx].split(&mut self.rng);
                 self.sites[src_idx] = site1;
                 self.sites.push(site2);
                 added.push(self.sites.len() - 1);
@@ -211,7 +222,7 @@ impl SiteCollection {
     }
 
     /// Find site with the closest neighbor (most "redundant" spatially)
-    fn find_closest_neighbor_site(&self) -> usize {
+    fn find_closest_neighbor_site(&mut self) -> usize {
         if self.sites.len() <= 1 {
             return 0;
         }
@@ -226,7 +237,7 @@ impl SiteCollection {
             let idx = if use_full_scan {
                 i
             } else {
-                (rand::random::<f64>() * self.sites.len() as f64) as usize
+                self.rng.gen_range(0..self.sites.len())
             };
 
             let site = &self.sites[idx];
@@ -254,5 +265,15 @@ impl SiteCollection {
     /// Get positions as a slice (for Voronoi computation)
     pub fn positions(&self) -> Vec<Position> {
         self.sites.iter().map(|s| s.pos).collect()
+    }
+
+    /// Get current site count
+    pub fn len(&self) -> usize {
+        self.sites.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.sites.is_empty()
     }
 }
