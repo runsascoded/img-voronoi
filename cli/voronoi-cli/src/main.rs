@@ -3,10 +3,14 @@
 //! Renders deterministic, frame-rate-independent Voronoi animations.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use voronoi_core::{CpuBackend, SiteCollection, VoronoiComputer};
+use voronoi_core::{CpuBackend, SiteCollection, ComputeBackend, Position};
+
+#[cfg(feature = "gpu")]
+use voronoi_core::GpuBackend;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum OutputFormat {
@@ -17,6 +21,7 @@ enum OutputFormat {
 #[derive(Parser, Debug)]
 #[command(name = "voronoi")]
 #[command(about = "Render Voronoi animations", long_about = None)]
+#[command(arg_required_else_help = true)]
 struct Args {
     /// Input image path
     #[arg(short, long)]
@@ -24,7 +29,7 @@ struct Args {
 
     /// Output file path
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Output format
     #[arg(short, long, value_enum, default_value = "mp4")]
@@ -61,6 +66,22 @@ struct Args {
     /// Use GPU acceleration (if available)
     #[arg(long)]
     gpu: bool,
+
+    /// Run benchmark comparing CPU vs GPU performance
+    #[arg(long)]
+    benchmark: bool,
+
+    /// Number of frames to render in benchmark mode
+    #[arg(long, default_value = "10")]
+    bench_frames: usize,
+
+    /// Number of sites to use in benchmark mode
+    #[arg(long, default_value = "500")]
+    bench_sites: usize,
+
+    /// Render a single frame (PNG) instead of animation
+    #[arg(long)]
+    single_frame: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,15 +93,58 @@ fn main() -> anyhow::Result<()> {
     let (width, height) = image.dimensions();
     println!("Image size: {}x{}", width, height);
 
-    // Initialize RNG with seed for reproducibility
-    // Note: In production, use a proper seeded RNG (e.g., rand_chacha)
-    // For now, we'll just use the standard RNG
+    // Run benchmark mode if requested
+    if args.benchmark {
+        return run_benchmark(&image, &args);
+    }
+
+    // Require output path for normal rendering
+    let output = args.output.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Output path required (use -o/--output)"))?;
 
     // Create backend
-    let mut computer = VoronoiComputer::new(CpuBackend::new());
+    #[cfg(feature = "gpu")]
+    let mut backend: Box<dyn ComputeBackend> = if args.gpu {
+        println!("Using GPU backend (wgpu)");
+        match GpuBackend::new() {
+            Ok(gpu) => Box::new(gpu),
+            Err(e) => {
+                eprintln!("Warning: GPU initialization failed: {}. Falling back to CPU.", e);
+                Box::new(CpuBackend::new())
+            }
+        }
+    } else {
+        println!("Using CPU backend (Rayon)");
+        Box::new(CpuBackend::new())
+    };
 
-    // Initialize sites
-    let mut sites = SiteCollection::random(args.sites_start, width as f64, height as f64);
+    #[cfg(not(feature = "gpu"))]
+    let mut backend: Box<dyn ComputeBackend> = {
+        if args.gpu {
+            eprintln!("Warning: GPU feature not enabled. Using CPU backend.");
+        } else {
+            println!("Using CPU backend (Rayon)");
+        }
+        Box::new(CpuBackend::new())
+    };
+
+    // Single frame mode: render one frame and save as PNG
+    if args.single_frame {
+        let sites = SiteCollection::random(args.sites_start, width as f64, height as f64, args.seed);
+        println!("Rendering single frame with {} sites (seed: {})", args.sites_start, args.seed);
+
+        let positions = sites.positions();
+        let result = backend.compute(&image, &positions)?;
+        let frame_image = result.to_image();
+        frame_image.save(output)?;
+
+        println!("Output saved to: {:?}", output);
+        return Ok(());
+    }
+
+    // Initialize sites with seeded RNG for reproducibility
+    let mut sites = SiteCollection::random(args.sites_start, width as f64, height as f64, args.seed);
+    println!("Using seed: {}", args.seed);
     let target_sites = args.sites_end;
 
     // Calculate frame timing
@@ -113,7 +177,7 @@ fn main() -> anyhow::Result<()> {
 
         // Compute Voronoi
         let positions = sites.positions();
-        let result = computer.compute(&image, &positions)?;
+        let result = backend.compute(&image, &positions)?;
 
         // Gradually adjust site count
         let (_, _) = sites.adjust_count(
@@ -135,15 +199,99 @@ fn main() -> anyhow::Result<()> {
     // Encode output
     match args.format {
         OutputFormat::Gif => {
-            encode_gif(&args.output, &frames, args.fps)?;
+            encode_gif(output, &frames, args.fps)?;
         }
         OutputFormat::Mp4 => {
-            encode_mp4(&args.output, &frames, args.fps, width, height)?;
+            encode_mp4(output, &frames, args.fps, width, height)?;
         }
     }
 
-    println!("Output saved to: {:?}", args.output);
+    println!("Output saved to: {:?}", output);
     Ok(())
+}
+
+/// Benchmark CPU vs GPU performance
+fn run_benchmark(image: &image::RgbImage, args: &Args) -> anyhow::Result<()> {
+    let (width, height) = image.dimensions();
+    let num_frames = args.bench_frames;
+    let num_sites = args.bench_sites;
+
+    println!("\n=== Voronoi Benchmark ===");
+    println!("Image: {}x{}", width, height);
+    println!("Sites: {}", num_sites);
+    println!("Frames: {}", num_frames);
+    println!();
+
+    // Generate fixed positions for fair comparison
+    let sites = SiteCollection::random(num_sites, width as f64, height as f64, args.seed);
+    let positions: Vec<Position> = sites.positions();
+
+    // Benchmark CPU
+    println!("Benchmarking CPU (Rayon)...");
+    let cpu_time = benchmark_backend(&mut CpuBackend::new(), image, &positions, num_frames)?;
+    let cpu_fps = num_frames as f64 / cpu_time.as_secs_f64();
+    println!(
+        "  CPU: {:?} total, {:.2} fps, {:.2} ms/frame",
+        cpu_time,
+        cpu_fps,
+        cpu_time.as_secs_f64() * 1000.0 / num_frames as f64
+    );
+
+    // Benchmark GPU (if available)
+    #[cfg(feature = "gpu")]
+    {
+        println!("Benchmarking GPU (wgpu)...");
+        match GpuBackend::new() {
+            Ok(mut gpu) => {
+                let gpu_time = benchmark_backend(&mut gpu, image, &positions, num_frames)?;
+                let gpu_fps = num_frames as f64 / gpu_time.as_secs_f64();
+                println!(
+                    "  GPU: {:?} total, {:.2} fps, {:.2} ms/frame",
+                    gpu_time,
+                    gpu_fps,
+                    gpu_time.as_secs_f64() * 1000.0 / num_frames as f64
+                );
+
+                // Summary
+                println!();
+                println!("=== Summary ===");
+                let speedup = cpu_time.as_secs_f64() / gpu_time.as_secs_f64();
+                if speedup > 1.0 {
+                    println!("GPU is {:.2}x faster than CPU", speedup);
+                } else {
+                    println!("CPU is {:.2}x faster than GPU", 1.0 / speedup);
+                }
+            }
+            Err(e) => {
+                eprintln!("  GPU initialization failed: {}", e);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        println!("GPU benchmark skipped (gpu feature not enabled)");
+    }
+
+    Ok(())
+}
+
+/// Benchmark a single backend
+fn benchmark_backend(
+    backend: &mut dyn ComputeBackend,
+    image: &image::RgbImage,
+    positions: &[Position],
+    num_frames: usize,
+) -> anyhow::Result<Duration> {
+    // Warmup frame (GPU needs to compile shaders, etc.)
+    let _ = backend.compute(image, positions)?;
+
+    // Timed frames
+    let start = Instant::now();
+    for _ in 0..num_frames {
+        let _ = backend.compute(image, positions)?;
+    }
+    Ok(start.elapsed())
 }
 
 fn encode_gif(path: &PathBuf, frames: &[image::RgbImage], fps: u32) -> anyhow::Result<()> {

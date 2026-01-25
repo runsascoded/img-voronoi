@@ -34,3 +34,4 @@ tempfile = "3"
 [features]
 default = []
 gpu = ["voronoi-core/gpu"]
+bench = []
