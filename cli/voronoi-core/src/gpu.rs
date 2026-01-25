@@ -378,7 +378,11 @@ impl ComputeBackend for GpuBackend {
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create output buffer for reading back
-        let output_buffer_size = (width * height * 4) as u64;
+        // wgpu requires bytes_per_row to be aligned to COPY_BYTES_PER_ROW_ALIGNMENT (256)
+        let unpadded_bytes_per_row = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let output_buffer_size = (padded_bytes_per_row * height) as u64;
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
             size: output_buffer_size,
@@ -434,7 +438,7 @@ impl ComputeBackend for GpuBackend {
                 buffer: &output_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(width * 4),
+                    bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(height),
                 },
             },
@@ -456,13 +460,16 @@ impl ComputeBackend for GpuBackend {
         let data = buffer_slice.get_mapped_range();
         let pixels: &[u8] = &data;
 
-        // Decode site indices from RGB
+        // Decode site indices from RGB, accounting for row padding
         let mut cell_of = vec![0i32; num_pixels];
-        for i in 0..num_pixels {
-            let px = i * 4;
-            cell_of[i] = pixels[px] as i32
-                + (pixels[px + 1] as i32) * 256
-                + (pixels[px + 2] as i32) * 65536;
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let i = y * width as usize + x;
+                let px = y * padded_bytes_per_row as usize + x * 4;
+                cell_of[i] = pixels[px] as i32
+                    + (pixels[px + 1] as i32) * 256
+                    + (pixels[px + 2] as i32) * 65536;
+            }
         }
 
         drop(data);
