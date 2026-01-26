@@ -13,11 +13,15 @@ fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn load_sample_image() -> image::RgbImage {
-    let path = fixtures_dir().join("sample.jpg");
+fn load_image(name: &str) -> image::RgbImage {
+    let path = fixtures_dir().join(name);
     image::open(&path)
-        .expect("Failed to load sample.jpg")
+        .unwrap_or_else(|_| panic!("Failed to load {}", name))
         .to_rgb8()
+}
+
+fn load_sample_image() -> image::RgbImage {
+    load_image("sample.jpg")
 }
 
 fn render_single_frame(
@@ -133,6 +137,61 @@ mod cpu {
             "Different seeds should produce different output"
         );
     }
+
+    // Stock image tests (from Unsplash)
+    #[test]
+    fn test_aurora_200sites() {
+        let image = load_image("aurora.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("aurora_200sites_cpu");
+        assert_images_equal(&expected, &actual, "aurora_200sites_cpu");
+    }
+
+    #[test]
+    fn test_aurora_500sites() {
+        let image = load_image("aurora.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("aurora_500sites_cpu");
+        assert_images_equal(&expected, &actual, "aurora_500sites_cpu");
+    }
+
+    #[test]
+    fn test_cityscape_200sites() {
+        let image = load_image("cityscape.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("cityscape_200sites_cpu");
+        assert_images_equal(&expected, &actual, "cityscape_200sites_cpu");
+    }
+
+    #[test]
+    fn test_cityscape_500sites() {
+        let image = load_image("cityscape.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("cityscape_500sites_cpu");
+        assert_images_equal(&expected, &actual, "cityscape_500sites_cpu");
+    }
+
+    #[test]
+    fn test_flowers_200sites() {
+        let image = load_image("flowers.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("flowers_200sites_cpu");
+        assert_images_equal(&expected, &actual, "flowers_200sites_cpu");
+    }
+
+    #[test]
+    fn test_flowers_500sites() {
+        let image = load_image("flowers.jpg");
+        let mut backend = CpuBackend::new();
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("flowers_500sites_cpu");
+        assert_images_equal(&expected, &actual, "flowers_500sites_cpu");
+    }
 }
 
 // GPU backend tests
@@ -216,5 +275,78 @@ mod gpu {
         let result2 = render_single_frame(&mut backend, &image, 200, 12345);
 
         assert_images_equal(&result1, &result2, "gpu_reproducibility");
+    }
+
+    // Stock image tests (from Unsplash)
+    #[test]
+    fn test_aurora_200sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("aurora.jpg");
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("aurora_200sites_gpu");
+        assert_images_equal(&expected, &actual, "aurora_200sites_gpu");
+    }
+
+    #[test]
+    fn test_aurora_500sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("aurora.jpg");
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("aurora_500sites_gpu");
+        assert_images_equal(&expected, &actual, "aurora_500sites_gpu");
+    }
+
+    #[test]
+    fn test_cityscape_200sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("cityscape.jpg");
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("cityscape_200sites_gpu");
+        assert_images_equal(&expected, &actual, "cityscape_200sites_gpu");
+    }
+
+    #[test]
+    fn test_cityscape_500sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("cityscape.jpg");
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("cityscape_500sites_gpu");
+        assert_images_equal(&expected, &actual, "cityscape_500sites_gpu");
+    }
+
+    #[test]
+    fn test_flowers_200sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("flowers.jpg");
+        let actual = render_single_frame(&mut backend, &image, 200, 0);
+        let expected = load_expected("flowers_200sites_gpu");
+        assert_images_equal(&expected, &actual, "flowers_200sites_gpu");
+    }
+
+    #[test]
+    fn test_flowers_500sites() {
+        let Some(mut backend) = get_gpu_backend() else {
+            eprintln!("GPU not available, skipping test");
+            return;
+        };
+        let image = load_image("flowers.jpg");
+        let actual = render_single_frame(&mut backend, &image, 500, 0);
+        let expected = load_expected("flowers_500sites_gpu");
+        assert_images_equal(&expected, &actual, "flowers_500sites_gpu");
     }
 }

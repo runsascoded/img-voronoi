@@ -1,0 +1,5 @@
+outs:
+- md5: dd1395e195d47bc381e5563a173f278b.dir
+  size: 2471498
+  hash: md5
+  path: fixtures
