@@ -17,8 +17,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sobel": "^0.0.11",
-    "use-kbd": "^0.7.0",
-    "use-prms": "^0.3.0",
+    "use-kbd": "github:runsascoded/use-kbd#d51354bbde2bf134570d81a5f8eee69ed730c0d8",
+    "use-prms": "github:runsascoded/use-prms#6cc90d220fd69990502a8e5e3ba8c73c988f63ff",
     "use-session-storage-state": "^19.0.1",
     "voronoi": "^1.0.0"
   },

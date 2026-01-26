@@ -30,11 +30,11 @@ importers:
         specifier: ^0.0.11
         version: 0.0.11
       use-kbd:
-        specifier: ^0.7.0
-        version: 0.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        specifier: github:runsascoded/use-kbd#d51354bbde2bf134570d81a5f8eee69ed730c0d8
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8(react@18.3.1)
       use-prms:
-        specifier: ^0.3.0
-        version: 0.3.0(react@18.3.1)
+        specifier: github:runsascoded/use-prms#6cc90d220fd69990502a8e5e3ba8c73c988f63ff
+        version: https://codeload.github.com/runsascoded/use-prms/tar.gz/6cc90d220fd69990502a8e5e3ba8c73c988f63ff(react@18.3.1)
       use-session-storage-state:
         specifier: ^19.0.1
         version: 19.0.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -2131,19 +2131,17 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@0.7.0:
-    resolution: {integrity: sha512-DHkeefDiM3yhAVtiWPalSRsl6TJi5uy4Nh/++Vr2zd+emaJ7gzMTEzUKhsvAx/nWCBfxqqf7GCoVWSjFudpw5g==}
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8}
+    version: 0.8.0-dist.2ae6d8e
     peerDependencies:
       react: '>=18.0.0'
-      react-dom: '>=18.0.0'
 
-  use-prms@0.3.0:
-    resolution: {integrity: sha512-DtCS0AspqUSvHIHduNv/87cn7f6PYiLyInA+azEftwaFPd9g8Yoi4S2rdnxOcYxsJzwZD4Aie0LHVyRKBa+tXA==}
+  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/6cc90d220fd69990502a8e5e3ba8c73c988f63ff:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/6cc90d220fd69990502a8e5e3ba8c73c988f63ff}
+    version: 0.4.0-dist.930ac95
     peerDependencies:
-      react: ^18.0.0 || ^19.0.0
-    peerDependenciesMeta:
-      react:
-        optional: true
+      react: ^18.0.0
 
   use-session-storage-state@19.0.1:
     resolution: {integrity: sha512-TK1K+UyTGNyOPN2K3yLOt0nTfeRlYRrLlNRN0kiI4irDng3HU4P0BArSAib0eD/VaQNlYs5WCdjeoEK1y/fIZA==}
@@ -4402,13 +4400,12 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@0.7.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/d51354bbde2bf134570d81a5f8eee69ed730c0d8(react@18.3.1):
     dependencies:
       react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
 
-  use-prms@0.3.0(react@18.3.1):
-    optionalDependencies:
+  use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/6cc90d220fd69990502a8e5e3ba8c73c988f63ff(react@18.3.1):
+    dependencies:
       react: 18.3.1
 
   use-session-storage-state@19.0.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1):

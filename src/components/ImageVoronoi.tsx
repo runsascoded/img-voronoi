@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
-import { useUrlParams, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
+import { useUrlStates, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
 import { useAction } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import Tooltip from '@mui/material/Tooltip'
@@ -208,7 +208,7 @@ export function ImageVoronoi() {
   const isRestoringRef = useRef(false)
 
   // URL params for shareable settings
-  const { values, setValues } = useUrlParams({
+  const { values, setValues } = useUrlStates({
     s: intParam(0),        // seed (default 0, omitted from URL)
     n: intParam(400),      // numSites
     i: boolParam,          // inversePP
