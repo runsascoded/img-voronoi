@@ -1,0 +1,5 @@
+outs:
+- md5: ffa0bc6162f2b6af8e643e10c43efed4
+  size: 111261
+  hash: md5
+  path: sample.jpg

@@ -1,0 +1,5 @@
+outs:
+- md5: 3241b9b6de8b5d97272389253e75fe00
+  size: 74846
+  hash: md5
+  path: flowers_200sites_cpu.png

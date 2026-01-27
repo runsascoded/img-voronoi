@@ -1,0 +1,5 @@
+outs:
+- md5: 05f3c64312257abdef3d778a2ed27c03
+  size: 164185
+  hash: md5
+  path: flowers.jpg

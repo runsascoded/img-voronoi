@@ -1,0 +1,5 @@
+outs:
+- md5: 2f9e1fec0e0e13893d5ad270affa24a8
+  size: 94874
+  hash: md5
+  path: cityscape_500sites.png

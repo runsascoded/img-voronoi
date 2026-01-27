@@ -1,0 +1,5 @@
+outs:
+- md5: 4db0e708971393d9b3517e3a5daf25fd
+  size: 68259
+  hash: md5
+  path: aurora_200sites_cpu.png

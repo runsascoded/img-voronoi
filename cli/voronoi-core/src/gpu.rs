@@ -1,84 +1,36 @@
 //! GPU-based Voronoi computation using wgpu.
 //!
-//! Uses the cone-rendering technique: each site is rendered as an inverted cone,
-//! and the depth buffer automatically finds the closest site per pixel.
+//! Uses a compute shader for brute-force nearest-site calculation,
+//! matching the CPU algorithm exactly for bitwise identical output.
 
 use crate::{Position, Rgb, Result, VoronoiError, VoronoiResult};
 use crate::voronoi::ComputeBackend;
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 
-/// Vertex data for cone rendering
+/// Per-site data for compute shader
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
-    position: [f32; 2],  // Position on unit circle (or 0,0 for apex)
-    z: f32,              // 0 at apex, 1 at base
+struct SiteData {
+    x: f32,
+    y: f32,
 }
 
-/// Per-instance site data
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct SiteInstance {
-    pos: [f32; 2],
-    index: u32,
-    _pad: u32,
-}
-
-const CONE_SEGMENTS: usize = 64;
-
-/// Generate cone vertex data (triangle fan)
-fn generate_cone_vertices() -> Vec<Vertex> {
-    let mut vertices = Vec::with_capacity(CONE_SEGMENTS + 2);
-
-    // Apex at center
-    vertices.push(Vertex {
-        position: [0.0, 0.0],
-        z: 0.0,
-    });
-
-    // Base vertices around the circle
-    for i in 0..=CONE_SEGMENTS {
-        let angle = (i as f32 / CONE_SEGMENTS as f32) * std::f32::consts::TAU;
-        vertices.push(Vertex {
-            position: [angle.cos(), angle.sin()],
-            z: 1.0,
-        });
-    }
-
-    vertices
-}
-
-/// Generate index buffer for triangle fan
-fn generate_cone_indices() -> Vec<u16> {
-    let mut indices = Vec::with_capacity(CONE_SEGMENTS * 3);
-
-    for i in 0..CONE_SEGMENTS {
-        indices.push(0);  // Apex
-        indices.push((i + 1) as u16);
-        indices.push((i + 2) as u16);
-    }
-
-    indices
-}
-
-/// GPU backend using wgpu
+/// GPU backend using wgpu compute shaders
 pub struct GpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
+    compute_pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
-    resolution: [f32; 2],
-    cone_height: f32,
-    _pad: f32,
+    width: u32,
+    height: u32,
+    num_sites: u32,
+    _pad: u32,
 }
 
 impl GpuBackend {
@@ -104,209 +56,125 @@ impl GpuBackend {
         ))
         .map_err(|e| VoronoiError::Gpu(format!("Failed to create device: {}", e)))?;
 
-        // Create vertex buffer
-        let vertices = generate_cone_vertices();
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Cone Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        // Create index buffer
-        let indices = generate_cone_indices();
-        let index_count = indices.len() as u32;
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Cone Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        // Create uniform buffer
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Uniform Buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         // Create bind group layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Uniform Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            label: Some("Voronoi Bind Group Layout"),
+            entries: &[
+                // Uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
-        });
-
-        // Create bind group
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Uniform Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+                // Sites buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Output buffer (cell assignments)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         // Create shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Voronoi Shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
+            label: Some("Voronoi Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
         });
 
         // Create pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
+            label: Some("Voronoi Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        // Create render pipeline
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Voronoi Render Pipeline"),
+        // Create compute pipeline
+        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Voronoi Compute Pipeline"),
             layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    // Vertex buffer (per-vertex)
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                offset: 0,
-                                shader_location: 0,
-                                format: wgpu::VertexFormat::Float32x2,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 8,
-                                shader_location: 1,
-                                format: wgpu::VertexFormat::Float32,
-                            },
-                        ],
-                    },
-                    // Instance buffer (per-instance)
-                    wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<SiteInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                offset: 0,
-                                shader_location: 2,
-                                format: wgpu::VertexFormat::Float32x2,
-                            },
-                            wgpu::VertexAttribute {
-                                offset: 8,
-                                shader_location: 3,
-                                format: wgpu::VertexFormat::Uint32,
-                            },
-                        ],
-                    },
-                ],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
             cache: None,
         });
 
         Ok(Self {
             device,
             queue,
-            render_pipeline,
-            vertex_buffer,
-            index_buffer,
-            index_count,
-            uniform_buffer,
-            uniform_bind_group,
+            compute_pipeline,
+            bind_group_layout,
         })
     }
 }
 
-// Add buffer initialization trait
-use wgpu::util::DeviceExt;
-
-const SHADER_SOURCE: &str = r#"
+const COMPUTE_SHADER: &str = r#"
 struct Uniforms {
-    resolution: vec2<f32>,
-    cone_height: f32,
-    _pad: f32,
+    width: u32,
+    height: u32,
+    num_sites: u32,
+    _pad: u32,
+}
+
+struct Site {
+    x: f32,
+    y: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var<storage, read> sites: array<Site>;
+@group(0) @binding(2) var<storage, read_write> output: array<i32>;
 
-struct VertexInput {
-    @location(0) cone_vertex: vec2<f32>,
-    @location(1) cone_z: f32,
-    @location(2) site_pos: vec2<f32>,
-    @location(3) site_index: u32,
-}
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
 
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) site_index: f32,
-}
+    if (x >= uniforms.width || y >= uniforms.height) {
+        return;
+    }
 
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
+    // Use pixel centers (x+0.5, y+0.5) to match CPU
+    let px = f32(x) + 0.5;
+    let py = f32(y) + 0.5;
 
-    // Scale cone to cover max possible distance
-    let radius = in.cone_z * uniforms.cone_height;
-    let pos = in.site_pos + in.cone_vertex * radius;
+    var min_dist = 3.402823e+38f; // f32::MAX approximation
+    var nearest: i32 = 0;
 
-    // Convert to clip space (-1 to 1)
-    let clip_pos = (pos / uniforms.resolution) * 2.0 - 1.0;
+    for (var i: u32 = 0u; i < uniforms.num_sites; i = i + 1u) {
+        let site = sites[i];
+        let dx = px - site.x;
+        let dy = py - site.y;
+        let dist = dx * dx + dy * dy;
+        // Use < (not <=) so lower index wins ties (matches CPU behavior)
+        if (dist < min_dist) {
+            min_dist = dist;
+            nearest = i32(i);
+        }
+    }
 
-    // Z is the distance from site (for depth testing)
-    // Flip Y for wgpu coordinate system
-    out.clip_position = vec4<f32>(clip_pos.x, -clip_pos.y, in.cone_z, 1.0);
-    out.site_index = f32(in.site_index);
-
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Encode site index as RGB (supports up to 16M sites)
-    let idx = in.site_index;
-    let r = idx % 256.0;
-    let g = floor(idx / 256.0) % 256.0;
-    let b = floor(idx / 65536.0) % 256.0;
-    return vec4<f32>(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    let idx = y * uniforms.width + x;
+    output[idx] = nearest;
 }
 "#;
 
@@ -325,131 +193,99 @@ impl ComputeBackend for GpuBackend {
         let num_pixels = (width * height) as usize;
         let num_sites = sites.len();
 
-        // Update uniforms
-        let cone_height = ((width * width + height * height) as f32).sqrt();
+        // Create uniform buffer
         let uniforms = Uniforms {
-            resolution: [width as f32, height as f32],
-            cone_height,
-            _pad: 0.0,
+            width,
+            height,
+            num_sites: num_sites as u32,
+            _pad: 0,
         };
-        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let uniform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::bytes_of(&uniforms),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
-        // Create instance buffer with site data
-        let instances: Vec<SiteInstance> = sites
+        // Create sites buffer
+        let site_data: Vec<SiteData> = sites
             .iter()
-            .enumerate()
-            .map(|(i, site)| SiteInstance {
-                pos: [site.x as f32, site.y as f32],
-                index: i as u32,
-                _pad: 0,
+            .map(|s| SiteData {
+                x: s.x as f32,
+                y: s.y as f32,
             })
             .collect();
-
-        let instance_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Site Instance Buffer"),
-            contents: bytemuck::cast_slice(&instances),
-            usage: wgpu::BufferUsages::VERTEX,
+        let sites_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sites Buffer"),
+            contents: bytemuck::cast_slice(&site_data),
+            usage: wgpu::BufferUsages::STORAGE,
         });
 
-        // Create render target texture
-        let render_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Voronoi Render Target"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let render_view = render_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create depth texture
-        let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth Texture"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create output buffer for reading back
-        // wgpu requires bytes_per_row to be aligned to COPY_BYTES_PER_ROW_ALIGNMENT (256)
-        let unpadded_bytes_per_row = width * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
-        let output_buffer_size = (padded_bytes_per_row * height) as u64;
+        // Create output buffer
+        let output_buffer_size = (num_pixels * std::mem::size_of::<i32>()) as u64;
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
+            size: output_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        // Create staging buffer for reading back
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
             size: output_buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        // Create command encoder and render
+        // Create bind group
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Voronoi Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sites_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Create command encoder
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Voronoi Encoder"),
         });
 
+        // Dispatch compute shader
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Voronoi Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &render_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Voronoi Compute Pass"),
                 timestamp_writes: None,
-                occlusion_query_set: None,
             });
+            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_bind_group(0, &bind_group, &[]);
 
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.index_count, 0, 0..num_sites as u32);
+            // Dispatch enough workgroups to cover all pixels
+            // Workgroup size is 16x16
+            let workgroups_x = (width + 15) / 16;
+            let workgroups_y = (height + 15) / 16;
+            compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
-        // Copy render target to output buffer
-        encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &render_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &output_buffer,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-        );
+        // Copy output to staging buffer
+        encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer_size);
 
         // Submit and wait
         self.queue.submit(std::iter::once(encoder.finish()));
 
-        // Read back the results
-        let buffer_slice = output_buffer.slice(..);
+        // Read back results
+        let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
@@ -458,22 +294,9 @@ impl ComputeBackend for GpuBackend {
         rx.recv().unwrap().map_err(|e| VoronoiError::Gpu(format!("Buffer map failed: {:?}", e)))?;
 
         let data = buffer_slice.get_mapped_range();
-        let pixels: &[u8] = &data;
-
-        // Decode site indices from RGB, accounting for row padding
-        let mut cell_of = vec![0i32; num_pixels];
-        for y in 0..height as usize {
-            for x in 0..width as usize {
-                let i = y * width as usize + x;
-                let px = y * padded_bytes_per_row as usize + x * 4;
-                cell_of[i] = pixels[px] as i32
-                    + (pixels[px + 1] as i32) * 256
-                    + (pixels[px + 2] as i32) * 65536;
-            }
-        }
-
+        let cell_of: Vec<i32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
-        output_buffer.unmap();
+        staging_buffer.unmap();
 
         // Compute colors by averaging image pixels per cell
         let mut r_sums = vec![0u64; num_sites];

@@ -47,16 +47,18 @@ impl ComputeBackend for CpuBackend {
             .flat_map(|y| {
                 let mut row = Vec::with_capacity(width as usize);
                 for x in 0..width {
-                    let px = x as f64;
-                    let py = y as f64;
+                    // Use pixel centers (x+0.5, y+0.5) and f32 to match GPU rasterization
+                    let px = x as f32 + 0.5;
+                    let py = y as f32 + 0.5;
 
-                    let mut min_dist = f64::INFINITY;
+                    let mut min_dist = f32::INFINITY;
                     let mut nearest = 0i32;
 
                     for (i, site) in sites.iter().enumerate() {
-                        let dx = px - site.x;
-                        let dy = py - site.y;
+                        let dx = px - site.x as f32;
+                        let dy = py - site.y as f32;
                         let dist = dx * dx + dy * dy;
+                        // Use < (not <=) so that lower index wins ties
                         if dist < min_dist {
                             min_dist = dist;
                             nearest = i as i32;

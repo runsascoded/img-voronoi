@@ -1,1 +1,5 @@
-/fixtures
+# Ignore actual fixture files (tracked by DVC)
+/fixtures/*.jpg
+/fixtures/*.png
+# But track the .dvc files (they're placeholders)
+!/fixtures/*.dvc

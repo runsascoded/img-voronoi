@@ -1,0 +1,5 @@
+outs:
+- md5: 0e38c79a1127f2d463d77ff4d0a8eb3e
+  size: 97685
+  hash: md5
+  path: aurora_500sites.png
