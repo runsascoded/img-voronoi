@@ -148,6 +148,35 @@ function mergeSites(sites: Position[], targetCount: number): Position[] {
   return removeWithSpatialAwareness(result, toRemove)
 }
 
+/**
+ * Detect cell boundary pixels and set them to black in-place.
+ * A pixel is a boundary if any 4-connected neighbor has a different cell.
+ */
+function applyEdgeOverlay(
+  pixels: Uint8ClampedArray,
+  cellOf: Int32Array,
+  width: number,
+  height: number,
+) {
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x
+      const cell = cellOf[idx]
+      if (
+        (x < width - 1 && cellOf[idx + 1] !== cell) ||
+        (y < height - 1 && cellOf[idx + width] !== cell) ||
+        (x > 0 && cellOf[idx - 1] !== cell) ||
+        (y > 0 && cellOf[idx - width] !== cell)
+      ) {
+        const px = idx * 4
+        pixels[px] = 0
+        pixels[px + 1] = 0
+        pixels[px + 2] = 0
+      }
+    }
+  }
+}
+
 export function ImageVoronoi() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const webglCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -182,6 +211,10 @@ export function ImageVoronoi() {
   // Site visualization
   const [showSites, setShowSites] = useState(false)
   const showSitesRef = useRef(false)
+
+  // Edges-only mode (show original image with cell boundary lines)
+  const [showEdgesOnly, setShowEdgesOnly] = useState(false)
+  const showEdgesOnlyRef = useRef(false)
 
   // Image metadata
   const [imageFilename, setImageFilename] = useState<string | null>(null)
@@ -314,6 +347,10 @@ export function ImageVoronoi() {
     showSitesRef.current = showSites
   }, [showSites])
 
+  useEffect(() => {
+    showEdgesOnlyRef.current = showEdgesOnly
+  }, [showEdgesOnly])
+
   // Sync targetSitesRef when numSites changes from slider or other direct updates
   useEffect(() => {
     // Only sync if not in gradual mode or if we're not animating
@@ -359,6 +396,21 @@ export function ImageVoronoi() {
     return webglRef.current
   }, [])
 
+  // Apply edges-only overlay if active (original image + boundary lines)
+  const applyEdgesOverlayIfActive = useCallback(() => {
+    if (!showEdgesOnlyRef.current || !cellOfRef.current || !originalImgDataRef.current) return
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    const { width, height } = canvas
+    const imgData = new ImageData(
+      new Uint8ClampedArray(originalImgDataRef.current.data),
+      width, height
+    )
+    applyEdgeOverlay(imgData.data, cellOfRef.current, width, height)
+    ctx.putImageData(imgData, 0, 0)
+  }, [])
+
   const drawVoronoi = useCallback((
     drawer: VoronoiDrawer,
     seedVal: number,
@@ -389,6 +441,7 @@ export function ImageVoronoi() {
               drawer.drawFromCellData(result.cellOf, result.cellColors, finalSites)
             }
           }
+          applyEdgesOverlayIfActive()
           return finalSites
         }
       }
@@ -404,8 +457,9 @@ export function ImageVoronoi() {
       cellOfRef.current = null
       cellColorsRef.current = null
     }
+    applyEdgesOverlayIfActive()
     return drawer.getSites()
-  }, [ensureWebGL])
+  }, [ensureWebGL, applyEdgesOverlayIfActive])
 
   // Compute available scale options based on original dimensions
   const getScaleOptions = useCallback((origWidth: number, origHeight: number) => {
@@ -904,26 +958,28 @@ export function ImageVoronoi() {
     }
   }, [])
 
-  // Redraw when showSites changes (if not animating)
+  // Redraw when showSites or showEdgesOnly changes (if not animating)
   useEffect(() => {
-    if (!isPlaying && animatedSitesRef.current.length > 0) {
+    if (!isPlaying) {
       const canvas = canvasRef.current
       const drawer = voronoiRef.current
       const originalImgData = originalImgDataRef.current
-      if (canvas && drawer && originalImgData) {
+      if (canvas && drawer && originalImgData && cellOfRef.current && cellColorsRef.current) {
         const ctx = canvas.getContext('2d')
         if (ctx) {
+          const currentSites = animatedSitesRef.current.length > 0 ? animatedSitesRef.current : drawer.getSites()
           ctx.putImageData(originalImgData, 0, 0)
           if (pixelRenderingRef.current) {
-            drawer.drawFromCellData(cellOfRef.current!, cellColorsRef.current!, animatedSitesRef.current)
+            drawer.drawFromCellData(cellOfRef.current!, cellColorsRef.current!, currentSites)
           } else {
-            drawer.fillVoronoi(animatedSitesRef.current)
+            drawer.fillVoronoi(currentSites)
           }
-          drawSitesOverlay(ctx, animatedSitesRef.current, velocitiesRef.current)
+          applyEdgesOverlayIfActive()
+          drawSitesOverlay(ctx, currentSites, velocitiesRef.current)
         }
       }
     }
-  }, [showSites, isPlaying, drawSitesOverlay])
+  }, [showSites, showEdgesOnly, isPlaying, drawSitesOverlay, applyEdgesOverlayIfActive])
 
   // Render a specific frame (sites) without advancing physics
   const renderFrame = useCallback((sites: Position[]) => {
@@ -948,6 +1004,8 @@ export function ImageVoronoi() {
           cellColorsRef.current = result.cellColors
           cellAreasRef.current = result.cellAreas
           drawer.drawFromCellData(result.cellOf, result.cellColors, sites)
+          applyEdgesOverlayIfActive()
+          drawSitesOverlay(ctx, sites, velocitiesRef.current)
           return
         }
       }
@@ -962,9 +1020,10 @@ export function ImageVoronoi() {
       drawer.fillVoronoi(sites)
     }
 
+    applyEdgesOverlayIfActive()
     // Draw site markers if enabled
     drawSitesOverlay(ctx, sites, velocitiesRef.current)
-  }, [ensureWebGL, drawSitesOverlay])
+  }, [ensureWebGL, drawSitesOverlay, applyEdgesOverlayIfActive])
 
   const animationStep = useCallback((saveToHistory = true) => {
     const canvas = canvasRef.current
@@ -1176,6 +1235,7 @@ export function ImageVoronoi() {
       drawer.fillVoronoi(animatedSites)
     }
 
+    applyEdgesOverlayIfActive()
     // Draw site markers if enabled
     drawSitesOverlay(ctx, animatedSites, velocities)
 
@@ -1187,7 +1247,7 @@ export function ImageVoronoi() {
       frameCountRef.current = 0
       fpsUpdateTimeRef.current = fpsNow
     }
-  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, setValues, drawSitesOverlay])
+  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, setValues, drawSitesOverlay, applyEdgesOverlayIfActive])
 
   const animate = useCallback(() => {
     animationStep()
@@ -1289,16 +1349,21 @@ export function ImageVoronoi() {
     )
     const pixels = imgData.data
 
-    // Color all pixels except the hovered cell
-    for (let i = 0; i < numPixels; i++) {
-      const cell = cellOf[i]
-      if (cell >= 0 && cell !== hoveredCellIdx && cellColors[cell]) {
-        const [r, g, b] = cellColors[cell]
-        const px = i * 4
-        pixels[px] = r
-        pixels[px + 1] = g
-        pixels[px + 2] = b
-        // alpha stays the same
+    if (showEdgesOnlyRef.current) {
+      // Edges-only: draw boundary lines on original image
+      applyEdgeOverlay(pixels, cellOf, width, height)
+    } else {
+      // Color all pixels except the hovered cell
+      for (let i = 0; i < numPixels; i++) {
+        const cell = cellOf[i]
+        if (cell >= 0 && cell !== hoveredCellIdx && cellColors[cell]) {
+          const [r, g, b] = cellColors[cell]
+          const px = i * 4
+          pixels[px] = r
+          pixels[px + 1] = g
+          pixels[px + 2] = b
+          // alpha stays the same
+        }
       }
     }
 
@@ -1514,6 +1579,17 @@ export function ImageVoronoi() {
     group: 'Voronoi',
     defaultBindings: ['u'],
     handler: triggerUpload,
+  })
+
+  const toggleEdgesOnly = useCallback(() => {
+    setShowEdgesOnly(prev => !prev)
+  }, [])
+
+  useAction('voronoi:edges-only', {
+    label: 'Toggle edges only',
+    group: 'Voronoi',
+    defaultBindings: ['e'],
+    handler: toggleEdgesOnly,
   })
 
   // Handle selecting an image from the gallery
@@ -1776,6 +1852,18 @@ export function ImageVoronoi() {
               onChange={() => setShowSites(!showSites)}
             />
             {' '}Sites
+          </label>
+        </Tooltip>
+
+        <Tooltip title="Show original image with cell boundaries (E)" arrow>
+          <label className="selection-label">
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={showEdgesOnly}
+              onChange={() => setShowEdgesOnly(!showEdgesOnly)}
+            />
+            {' '}Edges
           </label>
         </Tooltip>
 
