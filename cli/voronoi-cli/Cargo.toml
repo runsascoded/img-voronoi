@@ -25,11 +25,16 @@ indicatif = "0.17"
 # FFmpeg binding for video encoding (not used directly for now)
 # ffmpeg-next = "7"
 
+# YAML spec files
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Signal handling
+ctrlc = "3"
+
 # Error handling
 anyhow = "1"
 
-# Temp files for ffmpeg
-tempfile = "3"
 
 [features]
 default = []
