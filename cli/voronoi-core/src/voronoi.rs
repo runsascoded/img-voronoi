@@ -11,6 +11,10 @@ pub struct VoronoiResult {
     pub cell_colors: Vec<Rgb>,
     /// Area (pixel count) for each cell
     pub cell_areas: Vec<u32>,
+    /// Centroid (average position) for each cell
+    pub cell_centroids: Vec<Position>,
+    /// Point on the canvas furthest from any site
+    pub farthest_point: Position,
     /// Image dimensions
     pub width: u32,
     pub height: u32,

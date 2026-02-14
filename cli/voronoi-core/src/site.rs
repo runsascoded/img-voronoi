@@ -1,8 +1,52 @@
 //! Site and position types for Voronoi computation.
 
+use std::fmt;
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
+
+/// Strategy for adding new sites when growing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitStrategy {
+    /// Split the largest cell (children at parent position)
+    Max,
+    /// Weighted random split proportional to cell area
+    Weighted,
+    /// Split the most isolated site (furthest from any neighbor)
+    Isolated,
+    /// Spawn new site at centroid of the largest cell
+    Centroid,
+    /// Spawn new site at the point furthest from any site
+    Farthest,
+}
+
+impl fmt::Display for SplitStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SplitStrategy::Max => write!(f, "max"),
+            SplitStrategy::Weighted => write!(f, "weighted"),
+            SplitStrategy::Isolated => write!(f, "isolated"),
+            SplitStrategy::Centroid => write!(f, "centroid"),
+            SplitStrategy::Farthest => write!(f, "farthest"),
+        }
+    }
+}
+
+impl std::str::FromStr for SplitStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "max" => Ok(SplitStrategy::Max),
+            "weighted" => Ok(SplitStrategy::Weighted),
+            "isolated" => Ok(SplitStrategy::Isolated),
+            "centroid" => Ok(SplitStrategy::Centroid),
+            "farthest" => Ok(SplitStrategy::Farthest),
+            _ => Err(format!(
+                "unknown split strategy: '{}' (expected max, weighted, isolated, centroid, or farthest)", s
+            )),
+        }
+    }
+}
 
 /// 2D position
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,27 +99,36 @@ impl Velocity {
         Self::from_angle(rng.gen::<f64>() * TAU)
     }
 
-    /// Reflect off horizontal boundary
+    /// Current angle in radians
+    pub fn angle(&self) -> f64 {
+        self.y.atan2(self.x)
+    }
+
+    /// Reflect off vertical boundary (left/right edge)
     pub fn reflect_x(&mut self) {
         self.x = -self.x;
     }
 
-    /// Reflect off vertical boundary
+    /// Reflect off horizontal boundary (top/bottom edge)
     pub fn reflect_y(&mut self) {
         self.y = -self.y;
     }
 }
 
-/// A Voronoi site with position and velocity
+/// A Voronoi site with position, velocity, and dynamics
 #[derive(Debug, Clone)]
 pub struct Site {
     pub pos: Position,
     pub vel: Velocity,
+    /// Angular velocity (rad/s) — randomly perturbed each step for organic curved motion
+    pub turn_rate: f64,
+    /// Speed multiplier, decays toward 1.0 (used for split boost)
+    pub speed_mult: f64,
 }
 
 impl Site {
     pub fn new(pos: Position, vel: Velocity) -> Self {
-        Self { pos, vel }
+        Self { pos, vel, turn_rate: 0.0, speed_mult: 1.0 }
     }
 
     /// Create with random velocity
@@ -83,36 +136,72 @@ impl Site {
         Self {
             pos,
             vel: Velocity::random(rng),
+            turn_rate: 0.0,
+            speed_mult: 1.0,
         }
     }
 
-    /// Move site by velocity * speed * dt, bouncing off boundaries
-    pub fn step(&mut self, speed: f64, dt: f64, width: f64, height: f64) {
-        let movement = speed * dt;
+    /// Move site by velocity * speed * dt, with smooth random steering and edge bouncing
+    pub fn step(&mut self, speed: f64, dt: f64, width: f64, height: f64, rng: &mut impl Rng) {
+        // Rotate velocity direction by turn_rate
+        let angle = self.vel.angle() + self.turn_rate * dt;
+        self.vel = Velocity::from_angle(angle);
 
+        // Ornstein-Uhlenbeck process on turn_rate: smooth random direction changes
+        // theta = mean-reversion rate (how quickly turn_rate drifts back to 0)
+        // sigma = volatility (magnitude of random perturbation)
+        let theta = 3.0;
+        let sigma = 3.0;
+        let noise: f64 = rng.gen_range(-1.73..1.73);
+        self.turn_rate += -theta * self.turn_rate * dt + sigma * dt.sqrt() * noise;
+
+        // Decay speed multiplier toward 1.0 (half-life ~0.14s)
+        self.speed_mult = 1.0 + (self.speed_mult - 1.0) * (-5.0 * dt).exp();
+
+        // Move
+        let movement = speed * self.speed_mult * dt;
         self.pos.x += self.vel.x * movement;
         self.pos.y += self.vel.y * movement;
 
         // Bounce off edges
         if self.pos.x < 0.0 || self.pos.x >= width {
             self.vel.reflect_x();
+            self.turn_rate = -self.turn_rate;
             self.pos.x = self.pos.x.clamp(0.0, width - 1.0);
         }
         if self.pos.y < 0.0 || self.pos.y >= height {
             self.vel.reflect_y();
+            self.turn_rate = -self.turn_rate;
             self.pos.y = self.pos.y.clamp(0.0, height - 1.0);
         }
     }
 
-    /// Split into two sites moving in opposite directions
-    pub fn split(&self, rng: &mut impl Rng) -> (Site, Site) {
-        let angle = rng.gen::<f64>() * std::f64::consts::TAU;
+    /// Split into two sites at the same position, moving in opposite directions.
+    /// Children separate gradually via velocity + speed boost.
+    ///
+    /// If `centroid` is provided, one child is aimed toward the centroid (the cell's
+    /// center of mass, which is the direction of the most empty space).
+    pub fn split(&self, centroid: Option<&Position>, rng: &mut impl Rng) -> (Site, Site) {
+        let angle = if let Some(c) = centroid {
+            let dx = c.x - self.pos.x;
+            let dy = c.y - self.pos.y;
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist > 1.0 {
+                dy.atan2(dx)
+            } else {
+                rng.gen::<f64>() * std::f64::consts::TAU
+            }
+        } else {
+            rng.gen::<f64>() * std::f64::consts::TAU
+        };
         let vel1 = Velocity::from_angle(angle);
         let vel2 = Velocity::from_angle(angle + std::f64::consts::PI);
 
+        // Opposite turn rates so children curve away from each other, plus speed boost
+        let turn = rng.gen_range(1.0..4.0);
         (
-            Site::new(self.pos, vel1),
-            Site::new(self.pos, vel2),
+            Site { pos: self.pos, vel: vel1, turn_rate: turn, speed_mult: 3.0 },
+            Site { pos: self.pos, vel: vel2, turn_rate: -turn, speed_mult: 3.0 },
         )
     }
 }
@@ -121,7 +210,7 @@ impl Site {
 #[derive(Debug, Clone)]
 pub struct SiteCollection {
     pub sites: Vec<Site>,
-    pub fractional_sites: f64,  // Accumulated fractional sites for gradual growth
+    pub fractional_sites: f64,
     rng: ChaCha8Rng,
 }
 
@@ -153,22 +242,59 @@ impl SiteCollection {
         }
     }
 
-    /// Step all sites forward
-    pub fn step(&mut self, speed: f64, dt: f64, width: f64, height: f64) {
-        for site in &mut self.sites {
-            site.step(speed, dt, width, height);
+    /// Step all sites forward (index-based to allow disjoint borrows of sites + rng)
+    ///
+    /// If `centroids` and `centroid_pull` > 0, each site's velocity is steered
+    /// toward its cell centroid (continuous Lloyd's relaxation).
+    pub fn step(
+        &mut self,
+        speed: f64,
+        dt: f64,
+        width: f64,
+        height: f64,
+        centroids: Option<&[Position]>,
+        centroid_pull: f64,
+    ) {
+        if centroid_pull > 0.0 {
+            if let Some(centroids) = centroids {
+                let n = self.sites.len().min(centroids.len());
+                for i in 0..n {
+                    let site = &mut self.sites[i];
+                    let c = &centroids[i];
+                    let dx = c.x - site.pos.x;
+                    let dy = c.y - site.pos.y;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist > 0.5 {
+                        // Blend velocity toward centroid direction
+                        let target_angle = dy.atan2(dx);
+                        let current_angle = site.vel.angle();
+                        let mut delta = target_angle - current_angle;
+                        // Normalize to [-PI, PI]
+                        while delta > std::f64::consts::PI { delta -= std::f64::consts::TAU; }
+                        while delta < -std::f64::consts::PI { delta += std::f64::consts::TAU; }
+                        let steer = delta * centroid_pull * dt;
+                        site.vel = Velocity::from_angle(current_angle + steer);
+                    }
+                }
+            }
+        }
+        for i in 0..self.sites.len() {
+            self.sites[i].step(speed, dt, width, height, &mut self.rng);
         }
     }
 
     /// Gradually adjust site count toward target using exponential growth/decay
     ///
-    /// Returns indices of newly added sites (for split) or removed sites
+    /// Returns indices of newly added sites or removed sites.
     pub fn adjust_count(
         &mut self,
         target: usize,
         doubling_time: f64,
         dt: f64,
         cell_areas: Option<&[u32]>,
+        split_strategy: SplitStrategy,
+        centroids: Option<&[Position]>,
+        farthest_point: Option<Position>,
     ) -> (Vec<usize>, Vec<usize>) {
         if doubling_time <= 0.0 || target == self.sites.len() {
             return (vec![], vec![]);
@@ -185,27 +311,116 @@ impl SiteCollection {
         let mut added = vec![];
         let mut removed = vec![];
 
+        // Local mutable copy of areas: after each split, we zero the split cell's weight
+        // so it can't be re-selected (without-replacement sampling, max one split per site per frame).
+        let mut local_areas: Vec<u64> = cell_areas
+            .map(|a| a.iter().map(|&v| v as u64).collect())
+            .unwrap_or_default();
+        // Track already-split sites for Isolated strategy
+        let mut split_mask: Vec<bool> = vec![false; self.sites.len()];
+
         while self.fractional_sites >= 1.0 {
             self.fractional_sites -= 1.0;
 
             if growing && self.sites.len() < target {
-                // Split: pick site with largest area (or random if no areas)
-                let src_idx = if let Some(areas) = cell_areas {
-                    areas
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i < self.sites.len())
-                        .max_by_key(|(_, &area)| area)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0)
-                } else {
-                    self.rng.gen_range(0..self.sites.len())
-                };
+                match split_strategy {
+                    // Spawn strategies: create a new site at a computed position
+                    SplitStrategy::Centroid => {
+                        // Spawn at centroid of largest cell
+                        let pos = if let (Some(areas), Some(cents)) = (cell_areas, centroids) {
+                            let n = self.sites.len().min(areas.len()).min(cents.len());
+                            let mut max_area = 0u32;
+                            let mut idx = 0;
+                            for i in 0..n {
+                                if !split_mask.get(i).copied().unwrap_or(false) && areas[i] > max_area {
+                                    max_area = areas[i];
+                                    idx = i;
+                                }
+                            }
+                            if idx < split_mask.len() { split_mask[idx] = true; }
+                            cents[idx]
+                        } else {
+                            // Fallback: random position
+                            Position::new(
+                                self.rng.gen::<f64>() * 100.0,
+                                self.rng.gen::<f64>() * 100.0,
+                            )
+                        };
+                        self.sites.push(Site::with_random_velocity(pos, &mut self.rng));
+                        added.push(self.sites.len() - 1);
+                    }
+                    SplitStrategy::Farthest => {
+                        // Spawn at the point furthest from any site
+                        let pos = farthest_point.unwrap_or_else(|| Position::new(
+                            self.rng.gen::<f64>() * 100.0,
+                            self.rng.gen::<f64>() * 100.0,
+                        ));
+                        self.sites.push(Site::with_random_velocity(pos, &mut self.rng));
+                        added.push(self.sites.len() - 1);
+                        // farthest_point is stale after first spawn; subsequent spawns
+                        // this frame will reuse it, but that's acceptable (rare to spawn
+                        // multiple per frame at low site counts).
+                    }
+                    // Split strategies: split an existing site into two children
+                    _ => {
+                        let src_idx = match split_strategy {
+                            SplitStrategy::Isolated => {
+                                self.find_most_isolated_site(&split_mask)
+                            }
+                            _ if local_areas.is_empty() => {
+                                self.rng.gen_range(0..self.sites.len())
+                            }
+                            _ => {
+                                let n = self.sites.len().min(local_areas.len());
+                                match split_strategy {
+                                    SplitStrategy::Max => {
+                                        let mut max_area = 0u64;
+                                        let mut idx = 0;
+                                        for (i, &area) in local_areas[..n].iter().enumerate() {
+                                            if area > max_area {
+                                                max_area = area;
+                                                idx = i;
+                                            }
+                                        }
+                                        if max_area > 0 { idx } else { self.rng.gen_range(0..self.sites.len()) }
+                                    }
+                                    SplitStrategy::Weighted => {
+                                        let total: u64 = local_areas[..n].iter().sum();
+                                        if total > 0 {
+                                            let r = self.rng.gen_range(0..total);
+                                            let mut cum = 0u64;
+                                            let mut idx = 0;
+                                            for (i, &area) in local_areas[..n].iter().enumerate() {
+                                                cum += area;
+                                                if r < cum {
+                                                    idx = i;
+                                                    break;
+                                                }
+                                            }
+                                            idx
+                                        } else {
+                                            self.rng.gen_range(0..self.sites.len())
+                                        }
+                                    }
+                                    _ => unreachable!(),
+                                }
+                            }
+                        };
 
-                let (site1, site2) = self.sites[src_idx].split(&mut self.rng);
-                self.sites[src_idx] = site1;
-                self.sites.push(site2);
-                added.push(self.sites.len() - 1);
+                        let centroid = centroids.and_then(|c| c.get(src_idx));
+                        let (site1, site2) = self.sites[src_idx].split(centroid, &mut self.rng);
+                        self.sites[src_idx] = site1;
+                        self.sites.push(site2);
+                        added.push(self.sites.len() - 1);
+
+                        if src_idx < split_mask.len() {
+                            split_mask[src_idx] = true;
+                        }
+                        if src_idx < local_areas.len() {
+                            local_areas[src_idx] = 0;
+                        }
+                    }
+                }
             } else if !growing && self.sites.len() > target {
                 // Remove site with closest neighbor (maintains spatial distribution)
                 let remove_idx = self.find_closest_neighbor_site();
@@ -260,6 +475,37 @@ impl SiteCollection {
         }
 
         remove_idx
+    }
+
+    /// Find site with the largest nearest-neighbor distance (most isolated).
+    /// Skips sites already marked in `split_mask`.
+    fn find_most_isolated_site(&self, split_mask: &[bool]) -> usize {
+        let n = self.sites.len();
+        if n <= 1 {
+            return 0;
+        }
+
+        let mut max_nn_dist = -1.0f64;
+        let mut best_idx = 0;
+
+        for i in 0..n {
+            if i < split_mask.len() && split_mask[i] {
+                continue;
+            }
+            let site = &self.sites[i];
+            let mut nn_dist = f64::INFINITY;
+            for (j, other) in self.sites.iter().enumerate() {
+                if i == j { continue; }
+                let d = site.pos.dist_sq(&other.pos);
+                if d < nn_dist { nn_dist = d; }
+            }
+            if nn_dist > max_nn_dist {
+                max_nn_dist = nn_dist;
+                best_idx = i;
+            }
+        }
+
+        best_idx
     }
 
     /// Get positions as a slice (for Voronoi computation)

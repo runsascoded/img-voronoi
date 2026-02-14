@@ -298,10 +298,12 @@ impl ComputeBackend for GpuBackend {
         drop(data);
         staging_buffer.unmap();
 
-        // Compute colors by averaging image pixels per cell
+        // Compute colors and centroids by averaging image pixels per cell
         let mut r_sums = vec![0u64; num_sites];
         let mut g_sums = vec![0u64; num_sites];
         let mut b_sums = vec![0u64; num_sites];
+        let mut x_sums = vec![0u64; num_sites];
+        let mut y_sums = vec![0u64; num_sites];
         let mut cell_areas = vec![0u32; num_sites];
 
         for (i, &cell) in cell_of.iter().enumerate() {
@@ -314,29 +316,57 @@ impl ComputeBackend for GpuBackend {
                 r_sums[cell] += pixel[0] as u64;
                 g_sums[cell] += pixel[1] as u64;
                 b_sums[cell] += pixel[2] as u64;
+                x_sums[cell] += x as u64;
+                y_sums[cell] += y as u64;
                 cell_areas[cell] += 1;
             }
         }
 
-        let cell_colors: Vec<Rgb> = (0..num_sites)
-            .map(|i| {
-                let count = cell_areas[i] as u64;
-                if count > 0 {
-                    [
-                        (r_sums[i] / count) as u8,
-                        (g_sums[i] / count) as u8,
-                        (b_sums[i] / count) as u8,
-                    ]
-                } else {
-                    [128, 128, 128]
+        let mut cell_colors: Vec<Rgb> = Vec::with_capacity(num_sites);
+        let mut cell_centroids: Vec<Position> = Vec::with_capacity(num_sites);
+        for i in 0..num_sites {
+            let count = cell_areas[i] as u64;
+            if count > 0 {
+                cell_colors.push([
+                    (r_sums[i] / count) as u8,
+                    (g_sums[i] / count) as u8,
+                    (b_sums[i] / count) as u8,
+                ]);
+                cell_centroids.push(Position::new(
+                    x_sums[i] as f64 / count as f64,
+                    y_sums[i] as f64 / count as f64,
+                ));
+            } else {
+                cell_colors.push([128, 128, 128]);
+                cell_centroids.push(sites[i]);
+            }
+        }
+
+        // Find point furthest from any site
+        let num_pixels = (width * height) as usize;
+        let mut farthest_point = Position::new(0.0, 0.0);
+        let mut farthest_dist = 0.0f64;
+        for i in 0..num_pixels {
+            let cell = cell_of[i];
+            if cell >= 0 && (cell as usize) < num_sites {
+                let x = (i % width as usize) as f64 + 0.5;
+                let y = (i / width as usize) as f64 + 0.5;
+                let dx = x - sites[cell as usize].x;
+                let dy = y - sites[cell as usize].y;
+                let dist = dx * dx + dy * dy;
+                if dist > farthest_dist {
+                    farthest_dist = dist;
+                    farthest_point = Position::new(x, y);
                 }
-            })
-            .collect();
+            }
+        }
 
         Ok(VoronoiResult {
             cell_of,
             cell_colors,
             cell_areas,
+            cell_centroids,
+            farthest_point,
             width,
             height,
         })

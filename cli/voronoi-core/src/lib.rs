@@ -12,7 +12,7 @@ mod cpu;
 #[cfg(feature = "gpu")]
 mod gpu;
 
-pub use site::{Position, Site, SiteCollection, Velocity};
+pub use site::{Position, Site, SiteCollection, SplitStrategy, Velocity};
 pub use voronoi::{VoronoiComputer, VoronoiResult, ComputeBackend};
 
 #[cfg(feature = "cpu")]
