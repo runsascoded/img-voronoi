@@ -166,17 +166,12 @@ impl Site {
         }
     }
 
-    /// Move site by velocity * speed * dt, with smooth random steering and edge bouncing
-    pub fn step(&mut self, speed: f64, dt: f64, width: f64, height: f64, rng: &mut impl Rng) {
+    /// Move site by velocity * speed * dt, with smooth random steering and edge bouncing.
+    /// `theta` = O-U mean-reversion rate; `sigma` = O-U noise volatility.
+    pub fn step(&mut self, speed: f64, dt: f64, width: f64, height: f64, theta: f64, sigma: f64, rng: &mut impl Rng) {
         // Rotate velocity direction by turn_rate
         let angle = self.vel.angle() + self.turn_rate * dt;
         self.vel = Velocity::from_angle(angle);
-
-        // Ornstein-Uhlenbeck process on turn_rate: smooth random direction changes
-        // theta = mean-reversion rate (how quickly turn_rate drifts back to 0)
-        // sigma = volatility (magnitude of random perturbation)
-        let theta = 3.0;
-        let sigma = 3.0;
         let noise: f64 = rng.gen_range(-1.73..1.73);
         self.turn_rate += -theta * self.turn_rate * dt + sigma * dt.sqrt() * noise;
 
@@ -248,6 +243,19 @@ impl SiteCollection {
         }
     }
 
+    /// Create from existing positions with random velocities
+    pub fn random_from_positions(positions: Vec<Position>, seed: u64) -> Self {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let sites = positions.into_iter()
+            .map(|pos| Site::with_random_velocity(pos, &mut rng))
+            .collect();
+        Self {
+            sites,
+            fractional_sites: 0.0,
+            rng,
+        }
+    }
+
     /// Create sites at random positions with random velocities
     pub fn random(count: usize, width: f64, height: f64, seed: u64) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -289,6 +297,8 @@ impl SiteCollection {
         height: f64,
         centroids: Option<&[Position]>,
         centroid_pull: f64,
+        theta: f64,
+        sigma: f64,
     ) {
         if centroid_pull > 0.0 {
             if let Some(centroids) = centroids {
@@ -315,7 +325,7 @@ impl SiteCollection {
             }
         }
         for i in 0..self.sites.len() {
-            self.sites[i].step(speed, dt, width, height, &mut self.rng);
+            self.sites[i].step(speed, dt, width, height, theta, sigma, &mut self.rng);
         }
     }
 

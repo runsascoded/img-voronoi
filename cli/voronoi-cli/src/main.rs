@@ -585,6 +585,7 @@ fn main() -> anyhow::Result<()> {
             sites.step(
                 speed, dt, width as f64, height as f64,
                 Some(&result.cell_centroids), centroid_pull,
+                3.0, 3.0,
             );
 
             // Gradually adjust site count (skip if hold or already at target)

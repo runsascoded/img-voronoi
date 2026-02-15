@@ -6,8 +6,9 @@ license.workspace = true
 description = "Core Voronoi diagram computation library"
 
 [features]
-default = ["cpu"]
-cpu = ["rayon"]
+default = ["cpu", "parallel"]
+cpu = []
+parallel = ["cpu", "rayon"]
 gpu = ["wgpu", "pollster", "bytemuck"]
 
 [dependencies]

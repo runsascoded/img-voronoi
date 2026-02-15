@@ -1,5 +1,5 @@
 [workspace]
-members = ["voronoi-core", "voronoi-cli"]
+members = ["voronoi-core", "voronoi-cli", "voronoi-wasm"]
 resolver = "2"
 
 [workspace.package]

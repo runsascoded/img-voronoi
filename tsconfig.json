@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "voronoi-wasm": ["cli/voronoi-wasm/pkg/voronoi_wasm.d.ts"]
     }
   },
   "include": ["src"],

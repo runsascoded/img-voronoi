@@ -1,5 +1,8 @@
-//! CPU-based Voronoi computation using Rayon for parallelism.
+//! CPU-based Voronoi computation.
+//! When the `parallel` feature is enabled, uses Rayon for parallelism.
+//! Without it, runs sequentially (suitable for WASM targets).
 
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use crate::{Position, Rgb, Result, VoronoiError, VoronoiResult};
 use crate::voronoi::ComputeBackend;
@@ -22,6 +25,7 @@ impl CpuBackend {
     }
 
     /// Create a backend using the legacy multi-pass implementation (for benchmarking)
+    #[cfg(feature = "parallel")]
     pub fn new_multi_pass() -> Self {
         Self { num_threads: 0, merged: false }
     }
@@ -176,7 +180,8 @@ impl CpuBackend {
         let grid_ref = &grid;
         let img_raw = image.as_raw();
 
-        // Single pass: parallel over rows, each row produces cell_of + accumulators
+        // Single pass: assign each pixel to nearest site + accumulate
+        #[cfg(feature = "parallel")]
         let (cell_of, accum) = (0..height)
             .into_par_iter()
             .fold(
@@ -195,17 +200,14 @@ impl CpuBackend {
 
                         cells.push(nearest as i32);
 
-                        // Accumulate color/position/area (inline Phase 2)
                         let px_offset = (row_offset + x as usize) * 3;
                         acc.r_sums[cell] += img_raw[px_offset] as u64;
                         acc.g_sums[cell] += img_raw[px_offset + 1] as u64;
                         acc.b_sums[cell] += img_raw[px_offset + 2] as u64;
-                        // Use pixel centers (matching nearest_site convention)
-                        acc.x_sums[cell] += 2 * x as u64 + 1;  // 2x+1 to store half-pixel in integer
+                        acc.x_sums[cell] += 2 * x as u64 + 1;
                         acc.y_sums[cell] += 2 * y as u64 + 1;
                         acc.areas[cell] += 1;
 
-                        // Track farthest point (inline Phase 4)
                         let dist_f64 = dist_sq as f64;
                         if dist_f64 > acc.farthest_dist {
                             acc.farthest_dist = dist_f64;
@@ -224,6 +226,44 @@ impl CpuBackend {
                     (cells1, acc1.merge(acc2))
                 },
             );
+
+        #[cfg(not(feature = "parallel"))]
+        let (cell_of, accum) = {
+            let num_pixels = (width * height) as usize;
+            let mut cells = Vec::with_capacity(num_pixels);
+            let mut acc = RowAccum::new(num_sites);
+            for y in 0..height {
+                let py = y as f32 + 0.5;
+                let row_offset = (y * width) as usize;
+                for x in 0..width {
+                    let px = x as f32 + 0.5;
+                    let (nearest, dist_sq) = Self::nearest_site(
+                        px, py, grid_ref, grid_cols, grid_rows,
+                        gcell_w, gcell_h, sites,
+                    );
+                    let cell = nearest as usize;
+
+                    cells.push(nearest as i32);
+
+                    let px_offset = (row_offset + x as usize) * 3;
+                    acc.r_sums[cell] += img_raw[px_offset] as u64;
+                    acc.g_sums[cell] += img_raw[px_offset + 1] as u64;
+                    acc.b_sums[cell] += img_raw[px_offset + 2] as u64;
+                    acc.x_sums[cell] += 2 * x as u64 + 1;
+                    acc.y_sums[cell] += 2 * y as u64 + 1;
+                    acc.areas[cell] += 1;
+
+                    let dist_f64 = dist_sq as f64;
+                    if dist_f64 > acc.farthest_dist {
+                        acc.farthest_dist = dist_f64;
+                        acc.farthest_pos = Position::new(
+                            x as f64 + 0.5, y as f64 + 0.5,
+                        );
+                    }
+                }
+            }
+            (cells, acc)
+        };
 
         // Phase 3: Compute average colors and centroids (sequential, O(num_sites))
         let mut cell_colors: Vec<Rgb> = Vec::with_capacity(num_sites);
@@ -258,6 +298,7 @@ impl CpuBackend {
     }
 
     /// Legacy multi-pass implementation (for benchmarking comparison)
+    #[cfg(feature = "parallel")]
     fn compute_multi_pass(
         &self,
         image: &image::RgbImage,
@@ -408,11 +449,11 @@ impl ComputeBackend for CpuBackend {
         if sites.is_empty() {
             return Err(VoronoiError::NoSites);
         }
-        if self.merged {
-            self.compute_merged(image, sites)
-        } else {
-            self.compute_multi_pass(image, sites)
+        #[cfg(feature = "parallel")]
+        if !self.merged {
+            return self.compute_multi_pass(image, sites);
         }
+        self.compute_merged(image, sites)
     }
 }
 
@@ -528,6 +569,7 @@ mod tests {
 
     /// Verify merged and multi-pass produce identical results
     #[test]
+    #[cfg(feature = "parallel")]
     fn test_merged_vs_multi_pass() {
         use rand::Rng;
 
