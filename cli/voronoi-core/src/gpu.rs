@@ -1,7 +1,7 @@
 //! GPU-based Voronoi computation using wgpu.
 //!
-//! Uses a compute shader for brute-force nearest-site calculation,
-//! matching the CPU algorithm exactly for bitwise identical output.
+//! Uses a compute shader with spatial grid index for O(1)-amortized
+//! nearest-site lookup per pixel, matching the CPU grid algorithm.
 
 use crate::{Position, Rgb, Result, VoronoiError, VoronoiResult};
 use crate::voronoi::ComputeBackend;
@@ -16,12 +16,20 @@ struct SiteData {
     y: f32,
 }
 
+/// Grid cell offset: (start_index, count) into the flat grid_indices array
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GridCell {
+    start: u32,
+    count: u32,
+}
+
 /// GPU backend using wgpu compute shaders
 pub struct GpuBackend {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    compute_pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    grid_pipeline: wgpu::ComputePipeline,
+    grid_bind_group_layout: wgpu::BindGroupLayout,
 }
 
 #[repr(C)]
@@ -30,6 +38,10 @@ struct Uniforms {
     width: u32,
     height: u32,
     num_sites: u32,
+    grid_cols: u32,
+    grid_rows: u32,
+    gcell_w: f32,
+    gcell_h: f32,
     _pad: u32,
 }
 
@@ -56,11 +68,22 @@ impl GpuBackend {
         ))
         .map_err(|e| VoronoiError::Gpu(format!("Failed to create device: {}", e)))?;
 
-        // Create bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Voronoi Bind Group Layout"),
+        let storage_ro = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
+        // Grid pipeline bind group layout
+        let grid_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Voronoi Grid Bind Group Layout"),
             entries: &[
-                // Uniforms
+                // 0: Uniforms
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -71,18 +94,9 @@ impl GpuBackend {
                     },
                     count: None,
                 },
-                // Sites buffer
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Output buffer (cell assignments)
+                // 1: Sites
+                storage_ro(1),
+                // 2: Output (read_write)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -93,27 +107,28 @@ impl GpuBackend {
                     },
                     count: None,
                 },
+                // 3: Grid offsets (start, count per cell)
+                storage_ro(3),
+                // 4: Grid indices (flat site index array)
+                storage_ro(4),
             ],
         });
 
-        // Create shader module
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Voronoi Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Voronoi Grid Shader"),
+            source: wgpu::ShaderSource::Wgsl(GRID_SHADER.into()),
         });
 
-        // Create pipeline layout
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Voronoi Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+        let grid_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Voronoi Grid Pipeline Layout"),
+            bind_group_layouts: &[&grid_bind_group_layout],
             push_constant_ranges: &[],
         });
 
-        // Create compute pipeline
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Voronoi Compute Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
+        let grid_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Voronoi Grid Pipeline"),
+            layout: Some(&grid_pipeline_layout),
+            module: &grid_shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
@@ -122,17 +137,21 @@ impl GpuBackend {
         Ok(Self {
             device,
             queue,
-            compute_pipeline,
-            bind_group_layout,
+            grid_pipeline,
+            grid_bind_group_layout,
         })
     }
 }
 
-const COMPUTE_SHADER: &str = r#"
+const GRID_SHADER: &str = r#"
 struct Uniforms {
     width: u32,
     height: u32,
     num_sites: u32,
+    grid_cols: u32,
+    grid_rows: u32,
+    gcell_w: f32,
+    gcell_h: f32,
     _pad: u32,
 }
 
@@ -141,9 +160,16 @@ struct Site {
     y: f32,
 }
 
+struct GridCell {
+    start: u32,
+    count: u32,
+}
+
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var<storage, read> sites: array<Site>;
 @group(0) @binding(2) var<storage, read_write> output: array<i32>;
+@group(0) @binding(3) var<storage, read> grid_offsets: array<GridCell>;
+@group(0) @binding(4) var<storage, read> grid_indices: array<u32>;
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -154,22 +180,64 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Use pixel centers (x+0.5, y+0.5) to match CPU
     let px = f32(x) + 0.5;
     let py = f32(y) + 0.5;
 
-    var min_dist = 3.402823e+38f; // f32::MAX approximation
+    let gc = min(u32(px / uniforms.gcell_w), uniforms.grid_cols - 1u);
+    let gr = min(u32(py / uniforms.gcell_h), uniforms.grid_rows - 1u);
+    let ox = px - f32(gc) * uniforms.gcell_w;
+    let oy = py - f32(gr) * uniforms.gcell_h;
+
+    var min_dist = 3.402823e+38f;
     var nearest: i32 = 0;
 
-    for (var i: u32 = 0u; i < uniforms.num_sites; i = i + 1u) {
-        let site = sites[i];
-        let dx = px - site.x;
-        let dy = py - site.y;
-        let dist = dx * dx + dy * dy;
-        // Use < (not <=) so lower index wins ties (matches CPU behavior)
-        if (dist < min_dist) {
-            min_dist = dist;
-            nearest = i32(i);
+    for (var radius: u32 = 0u; radius < uniforms.grid_cols + uniforms.grid_rows; radius = radius + 1u) {
+        let r = radius;
+        // Compute ring bounds (clamped to grid)
+        var r_start: u32 = 0u;
+        if (gr >= r) { r_start = gr - r; }
+        let r_end = min(gr + r + 1u, uniforms.grid_rows);
+        var c_start: u32 = 0u;
+        if (gc >= r) { c_start = gc - r; }
+        let c_end = min(gc + r + 1u, uniforms.grid_cols);
+
+        for (var ri: u32 = r_start; ri < r_end; ri = ri + 1u) {
+            for (var ci: u32 = c_start; ci < c_end; ci = ci + 1u) {
+                // Skip interior cells (already checked at smaller radius)
+                if (radius > 0u
+                    && ri > r_start && ri < r_end - 1u
+                    && ci > c_start && ci < c_end - 1u) {
+                    continue;
+                }
+                let cell_idx = ri * uniforms.grid_cols + ci;
+                let cell = grid_offsets[cell_idx];
+                for (var j: u32 = 0u; j < cell.count; j = j + 1u) {
+                    let site_idx = grid_indices[cell.start + j];
+                    let site = sites[site_idx];
+                    let dx = px - site.x;
+                    let dy = py - site.y;
+                    let dist = dx * dx + dy * dy;
+                    if (dist < min_dist) {
+                        min_dist = dist;
+                        nearest = i32(site_idx);
+                    }
+                }
+            }
+        }
+
+        // Early exit: nearest site closer than any unchecked grid cell
+        let rf = f32(radius);
+        let min_unchecked = min(
+            min(ox + rf * uniforms.gcell_w, uniforms.gcell_w * (rf + 1.0) - ox),
+            min(oy + rf * uniforms.gcell_h, uniforms.gcell_h * (rf + 1.0) - oy)
+        );
+        if (min_dist <= min_unchecked * min_unchecked) {
+            break;
+        }
+        // Safety: checked all grid cells
+        if (r_start == 0u && c_start == 0u
+            && r_end == uniforms.grid_rows && c_end == uniforms.grid_cols) {
+            break;
         }
     }
 
@@ -177,6 +245,46 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     output[idx] = nearest;
 }
 "#;
+
+impl GpuBackend {
+    /// Build flattened grid for GPU upload. Returns (offsets, indices, cols, rows, cell_w, cell_h).
+    fn build_grid_flat(
+        sites: &[Position], width: u32, height: u32,
+    ) -> (Vec<GridCell>, Vec<u32>, u32, u32, f32, f32) {
+        let num_sites = sites.len();
+        let grid_side = (num_sites as f64).sqrt().ceil() as usize;
+        let grid_cols = grid_side.max(1);
+        let grid_rows = grid_side.max(1);
+        let gcell_w = width as f32 / grid_cols as f32;
+        let gcell_h = height as f32 / grid_rows as f32;
+
+        // Bin sites into grid cells
+        let mut cells: Vec<Vec<u32>> = vec![Vec::new(); grid_cols * grid_rows];
+        for (i, site) in sites.iter().enumerate() {
+            let gc = ((site.x as f32 / gcell_w) as usize).min(grid_cols - 1);
+            let gr = ((site.y as f32 / gcell_h) as usize).min(grid_rows - 1);
+            cells[gr * grid_cols + gc].push(i as u32);
+        }
+
+        // Flatten into offset + indices arrays
+        let mut offsets = Vec::with_capacity(grid_cols * grid_rows);
+        let mut indices = Vec::new();
+        for cell in &cells {
+            offsets.push(GridCell {
+                start: indices.len() as u32,
+                count: cell.len() as u32,
+            });
+            indices.extend_from_slice(cell);
+        }
+
+        // wgpu requires non-empty storage buffers
+        if indices.is_empty() {
+            indices.push(0);
+        }
+
+        (offsets, indices, grid_cols as u32, grid_rows as u32, gcell_w, gcell_h)
+    }
+}
 
 impl ComputeBackend for GpuBackend {
     fn compute(
@@ -193,11 +301,19 @@ impl ComputeBackend for GpuBackend {
         let num_pixels = (width * height) as usize;
         let num_sites = sites.len();
 
+        // Build grid on CPU
+        let (grid_offsets, grid_indices, grid_cols, grid_rows, gcell_w, gcell_h) =
+            Self::build_grid_flat(sites, width, height);
+
         // Create uniform buffer
         let uniforms = Uniforms {
             width,
             height,
             num_sites: num_sites as u32,
+            grid_cols,
+            grid_rows,
+            gcell_w,
+            gcell_h,
             _pad: 0,
         };
         let uniform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -209,10 +325,7 @@ impl ComputeBackend for GpuBackend {
         // Create sites buffer
         let site_data: Vec<SiteData> = sites
             .iter()
-            .map(|s| SiteData {
-                x: s.x as f32,
-                y: s.y as f32,
-            })
+            .map(|s| SiteData { x: s.x as f32, y: s.y as f32 })
             .collect();
         let sites_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Sites Buffer"),
@@ -229,6 +342,18 @@ impl ComputeBackend for GpuBackend {
             mapped_at_creation: false,
         });
 
+        // Create grid buffers
+        let grid_offsets_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grid Offsets Buffer"),
+            contents: bytemuck::cast_slice(&grid_offsets),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let grid_indices_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grid Indices Buffer"),
+            contents: bytemuck::cast_slice(&grid_indices),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
         // Create staging buffer for reading back
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
@@ -239,8 +364,8 @@ impl ComputeBackend for GpuBackend {
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Voronoi Bind Group"),
-            layout: &self.bind_group_layout,
+            label: Some("Voronoi Grid Bind Group"),
+            layout: &self.grid_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -254,25 +379,28 @@ impl ComputeBackend for GpuBackend {
                     binding: 2,
                     resource: output_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: grid_offsets_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: grid_indices_buffer.as_entire_binding(),
+                },
             ],
         });
 
-        // Create command encoder
+        // Dispatch compute shader
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Voronoi Encoder"),
         });
-
-        // Dispatch compute shader
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Voronoi Compute Pass"),
+                label: Some("Voronoi Grid Compute Pass"),
                 timestamp_writes: None,
             });
-            compute_pass.set_pipeline(&self.compute_pipeline);
+            compute_pass.set_pipeline(&self.grid_pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-
-            // Dispatch enough workgroups to cover all pixels
-            // Workgroup size is 16x16
             let workgroups_x = (width + 15) / 16;
             let workgroups_y = (height + 15) / 16;
             compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
@@ -280,8 +408,6 @@ impl ComputeBackend for GpuBackend {
 
         // Copy output to staging buffer
         encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer_size);
-
-        // Submit and wait
         self.queue.submit(std::iter::once(encoder.finish()));
 
         // Read back results
@@ -298,27 +424,40 @@ impl ComputeBackend for GpuBackend {
         drop(data);
         staging_buffer.unmap();
 
-        // Compute colors and centroids by averaging image pixels per cell
+        // CPU-side: accumulate colors, centroids, farthest point
+        let img_raw = image.as_raw();
         let mut r_sums = vec![0u64; num_sites];
         let mut g_sums = vec![0u64; num_sites];
         let mut b_sums = vec![0u64; num_sites];
         let mut x_sums = vec![0u64; num_sites];
         let mut y_sums = vec![0u64; num_sites];
         let mut cell_areas = vec![0u32; num_sites];
+        let mut farthest_point = Position::new(0.0, 0.0);
+        let mut farthest_dist = 0.0f64;
 
         for (i, &cell) in cell_of.iter().enumerate() {
             if cell >= 0 && (cell as usize) < num_sites {
-                let cell = cell as usize;
+                let cell_usize = cell as usize;
                 let x = (i % width as usize) as u32;
                 let y = (i / width as usize) as u32;
-                let pixel = image.get_pixel(x, y);
+                let px_offset = i * 3;
 
-                r_sums[cell] += pixel[0] as u64;
-                g_sums[cell] += pixel[1] as u64;
-                b_sums[cell] += pixel[2] as u64;
-                x_sums[cell] += x as u64;
-                y_sums[cell] += y as u64;
-                cell_areas[cell] += 1;
+                r_sums[cell_usize] += img_raw[px_offset] as u64;
+                g_sums[cell_usize] += img_raw[px_offset + 1] as u64;
+                b_sums[cell_usize] += img_raw[px_offset + 2] as u64;
+                x_sums[cell_usize] += x as u64;
+                y_sums[cell_usize] += y as u64;
+                cell_areas[cell_usize] += 1;
+
+                let fx = x as f64 + 0.5;
+                let fy = y as f64 + 0.5;
+                let dx = fx - sites[cell_usize].x;
+                let dy = fy - sites[cell_usize].y;
+                let dist = dx * dx + dy * dy;
+                if dist > farthest_dist {
+                    farthest_dist = dist;
+                    farthest_point = Position::new(fx, fy);
+                }
             }
         }
 
@@ -339,25 +478,6 @@ impl ComputeBackend for GpuBackend {
             } else {
                 cell_colors.push([128, 128, 128]);
                 cell_centroids.push(sites[i]);
-            }
-        }
-
-        // Find point furthest from any site
-        let num_pixels = (width * height) as usize;
-        let mut farthest_point = Position::new(0.0, 0.0);
-        let mut farthest_dist = 0.0f64;
-        for i in 0..num_pixels {
-            let cell = cell_of[i];
-            if cell >= 0 && (cell as usize) < num_sites {
-                let x = (i % width as usize) as f64 + 0.5;
-                let y = (i / width as usize) as f64 + 0.5;
-                let dx = x - sites[cell as usize].x;
-                let dy = y - sites[cell as usize].y;
-                let dist = dx * dx + dy * dy;
-                if dist > farthest_dist {
-                    farthest_dist = dist;
-                    farthest_point = Position::new(x, y);
-                }
             }
         }
 
