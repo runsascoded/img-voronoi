@@ -6,7 +6,7 @@ use rand_chacha::ChaCha8Rng;
 use rand::SeedableRng;
 
 /// Strategy for adding new sites when growing
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SplitStrategy {
     /// Split the largest cell (children at parent position)
     Max,
@@ -18,6 +18,12 @@ pub enum SplitStrategy {
     Centroid,
     /// Spawn new site at the point furthest from any site
     Farthest,
+    /// Poisson distance-threshold: sites spawn at centroids of large cells,
+    /// but only when well-spaced from neighbors. Rate scales with excess spacing.
+    /// Parameters: (threshold_k, lambda)
+    ///   threshold_k: multiplier on expected spacing sqrt(area/n); ~1.0-2.0
+    ///   lambda: Poisson rate; higher = more aggressive spawning when eligible
+    Poisson(f64, f64),
 }
 
 impl fmt::Display for SplitStrategy {
@@ -28,6 +34,7 @@ impl fmt::Display for SplitStrategy {
             SplitStrategy::Isolated => write!(f, "isolated"),
             SplitStrategy::Centroid => write!(f, "centroid"),
             SplitStrategy::Farthest => write!(f, "farthest"),
+            SplitStrategy::Poisson(k, l) => write!(f, "poisson({},{})", k, l),
         }
     }
 }
@@ -35,14 +42,32 @@ impl fmt::Display for SplitStrategy {
 impl std::str::FromStr for SplitStrategy {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        let lower = s.to_lowercase();
+        match lower.as_str() {
             "max" => Ok(SplitStrategy::Max),
             "weighted" => Ok(SplitStrategy::Weighted),
             "isolated" => Ok(SplitStrategy::Isolated),
             "centroid" => Ok(SplitStrategy::Centroid),
             "farthest" => Ok(SplitStrategy::Farthest),
+            _ if lower.starts_with("poisson") => {
+                // Parse "poisson" (defaults) or "poisson(k,lambda)"
+                if let Some(params) = lower.strip_prefix("poisson(").and_then(|s| s.strip_suffix(')')) {
+                    let parts: Vec<&str> = params.split(',').collect();
+                    if parts.len() == 2 {
+                        let k = parts[0].trim().parse::<f64>().map_err(|e| format!("bad threshold_k: {}", e))?;
+                        let l = parts[1].trim().parse::<f64>().map_err(|e| format!("bad lambda: {}", e))?;
+                        Ok(SplitStrategy::Poisson(k, l))
+                    } else {
+                        Err(format!("poisson expects 2 params: poisson(k,lambda), got {}", parts.len()))
+                    }
+                } else if lower == "poisson" {
+                    Ok(SplitStrategy::Poisson(1.0, 3.0))
+                } else {
+                    Err(format!("invalid poisson syntax: '{}', expected poisson or poisson(k,lambda)", s))
+                }
+            }
             _ => Err(format!(
-                "unknown split strategy: '{}' (expected max, weighted, isolated, centroid, or farthest)", s
+                "unknown split strategy: '{}' (expected max, weighted, isolated, centroid, farthest, or poisson)", s
             )),
         }
     }
@@ -242,6 +267,16 @@ impl SiteCollection {
         }
     }
 
+    /// Average velocity vector across all sites (for drift detection)
+    pub fn avg_velocity(&self) -> (f64, f64) {
+        if self.sites.is_empty() { return (0.0, 0.0); }
+        let n = self.sites.len() as f64;
+        let (sx, sy) = self.sites.iter().fold((0.0, 0.0), |(ax, ay), s| {
+            (ax + s.vel.x * s.speed_mult, ay + s.vel.y * s.speed_mult)
+        });
+        (sx / n, sy / n)
+    }
+
     /// Step all sites forward (index-based to allow disjoint borrows of sites + rng)
     ///
     /// If `centroids` and `centroid_pull` > 0, each site's velocity is steered
@@ -276,6 +311,7 @@ impl SiteCollection {
                         site.vel = Velocity::from_angle(current_angle + steer);
                     }
                 }
+
             }
         }
         for i in 0..self.sites.len() {
@@ -283,8 +319,9 @@ impl SiteCollection {
         }
     }
 
-    /// Gradually adjust site count toward target using exponential growth/decay
+    /// Gradually adjust site count toward target using exponential growth/decay.
     ///
+    /// For Poisson strategy, `img_area` is used to compute density-dependent threshold.
     /// Returns indices of newly added sites or removed sites.
     pub fn adjust_count(
         &mut self,
@@ -295,6 +332,7 @@ impl SiteCollection {
         split_strategy: SplitStrategy,
         centroids: Option<&[Position]>,
         farthest_point: Option<Position>,
+        img_area: f64,
     ) -> (Vec<usize>, Vec<usize>) {
         if doubling_time <= 0.0 || target == self.sites.len() {
             return (vec![], vec![]);
@@ -303,10 +341,35 @@ impl SiteCollection {
         let current = self.sites.len();
         let growing = target > current;
 
+        // Poisson strategy: use exponential clock but gate spawns by NN distance.
+        // Pre-compute eligible sites once, before the spawn loop.
+        let poisson_eligible: Option<Vec<usize>> = if let SplitStrategy::Poisson(threshold_k, _lambda) = split_strategy {
+            if growing {
+                let expected_spacing = (img_area / current as f64).sqrt();
+                let threshold = threshold_k * expected_spacing;
+                let nn_dists = self.nearest_neighbor_dists();
+                // Sites whose NN distance exceeds threshold are eligible to "trigger" a spawn
+                let eligible: Vec<usize> = (0..current)
+                    .filter(|&i| nn_dists[i] > threshold)
+                    .collect();
+                Some(eligible)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Rate: ln(2) / doubling_time gives exponential growth with specified doubling time
         let rate = std::f64::consts::LN_2 / doubling_time;
         let expected_change = current as f64 * rate * dt;
         self.fractional_sites += expected_change;
+
+        // For Poisson, cap buffered spawns to prevent burst after eligibility clears
+        if matches!(split_strategy, SplitStrategy::Poisson(_, _)) {
+            let max_buffered = (current as f64 * 0.1).max(2.0);
+            self.fractional_sites = self.fractional_sites.min(max_buffered);
+        }
 
         let mut added = vec![];
         let mut removed = vec![];
@@ -323,7 +386,17 @@ impl SiteCollection {
             self.fractional_sites -= 1.0;
 
             if growing && self.sites.len() < target {
+                // Poisson gating: if no sites are eligible, defer spawn (buffer fractional_sites)
+                if let Some(ref eligible) = poisson_eligible {
+                    if eligible.is_empty() {
+                        self.fractional_sites += 1.0;
+                        break;
+                    }
+                }
+
                 match split_strategy {
+                    // Poisson: spawn at centroid of largest cell (like Centroid), gated by NN distance
+                    SplitStrategy::Poisson(_, _) |
                     // Spawn strategies: create a new site at a computed position
                     SplitStrategy::Centroid => {
                         // Spawn at centroid of largest cell
@@ -357,9 +430,6 @@ impl SiteCollection {
                         ));
                         self.sites.push(Site::with_random_velocity(pos, &mut self.rng));
                         added.push(self.sites.len() - 1);
-                        // farthest_point is stale after first spawn; subsequent spawns
-                        // this frame will reuse it, but that's acceptable (rare to spawn
-                        // multiple per frame at low site counts).
                     }
                     // Split strategies: split an existing site into two children
                     _ => {
@@ -434,6 +504,82 @@ impl SiteCollection {
         }
 
         (added, removed)
+    }
+
+
+    /// Compute nearest-neighbor distance for each site using a spatial grid (O(n) expected).
+    fn nearest_neighbor_dists(&self) -> Vec<f64> {
+        let n = self.sites.len();
+        if n <= 1 {
+            return vec![f64::INFINITY; n];
+        }
+
+        // Find bounding box
+        let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+        let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for s in &self.sites {
+            min_x = min_x.min(s.pos.x);
+            min_y = min_y.min(s.pos.y);
+            max_x = max_x.max(s.pos.x);
+            max_y = max_y.max(s.pos.y);
+        }
+        let w = (max_x - min_x).max(1.0);
+        let h = (max_y - min_y).max(1.0);
+
+        // Grid with cell size ≈ expected spacing, so neighbors are in adjacent cells
+        let grid_size = (n as f64).sqrt().ceil() as usize;
+        let cell_w = w / grid_size as f64;
+        let cell_h = h / grid_size as f64;
+        let cols = grid_size;
+        let rows = grid_size;
+
+        // Build grid: each cell contains a list of site indices
+        let mut grid: Vec<Vec<usize>> = vec![vec![]; cols * rows];
+        for (i, s) in self.sites.iter().enumerate() {
+            let cx = ((s.pos.x - min_x) / cell_w).min((cols - 1) as f64) as usize;
+            let cy = ((s.pos.y - min_y) / cell_h).min((rows - 1) as f64) as usize;
+            grid[cy * cols + cx].push(i);
+        }
+
+        // For each site, search expanding rings until we can guarantee nearest found
+        let mut dists = vec![f64::INFINITY; n];
+        for i in 0..n {
+            let sx = self.sites[i].pos.x;
+            let sy = self.sites[i].pos.y;
+            let cx = ((sx - min_x) / cell_w).min((cols - 1) as f64) as usize;
+            let cy = ((sy - min_y) / cell_h).min((rows - 1) as f64) as usize;
+
+            let mut best = f64::INFINITY;
+            // Check ring 0, then ring 1, etc., until ring's min possible distance > best
+            for ring in 0..=(cols.max(rows)) {
+                let min_ring_dist = if ring == 0 { 0.0 } else {
+                    let dx = ((ring as f64 - 1.0) * cell_w).max(0.0);
+                    let dy = ((ring as f64 - 1.0) * cell_h).max(0.0);
+                    (dx * dx + dy * dy).sqrt()
+                };
+                if min_ring_dist > best { break; }
+
+                let r0 = cy.saturating_sub(ring);
+                let r1 = (cy + ring).min(rows - 1);
+                let c0 = cx.saturating_sub(ring);
+                let c1 = (cx + ring).min(cols - 1);
+                for gy in r0..=r1 {
+                    for gx in c0..=c1 {
+                        // Only visit cells on the ring boundary (skip interior for ring > 0)
+                        if ring > 0 && gy > r0 && gy < r1 && gx > c0 && gx < c1 { continue; }
+                        for &j in &grid[gy * cols + gx] {
+                            if j == i { continue; }
+                            let dx = sx - self.sites[j].pos.x;
+                            let dy = sy - self.sites[j].pos.y;
+                            let d = (dx * dx + dy * dy).sqrt();
+                            if d < best { best = d; }
+                        }
+                    }
+                }
+            }
+            dists[i] = best;
+        }
+        dists
     }
 
     /// Find site with the closest neighbor (most "redundant" spatially)

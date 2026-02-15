@@ -53,7 +53,7 @@ enum OutputFormat {
     Gif,
 }
 
-/// A single animation phase (grow, shrink, or hold)
+/// A single animation phase (grow, shrink, hold, or fade)
 #[derive(Debug, Clone)]
 struct Phase {
     /// Target site count (None = hold at current)
@@ -62,6 +62,8 @@ struct Phase {
     doubling_time: f64,
     /// Phase duration in seconds
     duration: f64,
+    /// Crossfade to original image (0→1 blend over duration)
+    fade: bool,
 }
 
 /// YAML spec file format
@@ -90,7 +92,7 @@ struct AnimSpec {
 fn default_fps() -> u32 { 30 }
 fn default_speed() -> f64 { 15.0 }
 
-/// A phase in the YAML spec (provide 2 of {n, dt, t}, or just t for hold)
+/// A phase in the YAML spec (provide 2 of {n, dt, t}, or just t for hold, or fade for crossfade)
 #[derive(Debug, Deserialize)]
 struct PhaseSpec {
     /// Target site count
@@ -99,26 +101,37 @@ struct PhaseSpec {
     dt: Option<f64>,
     /// Phase duration (seconds)
     t: Option<f64>,
+    /// Crossfade to original image duration (seconds)
+    #[serde(default)]
+    fade: Option<f64>,
 }
 
 impl PhaseSpec {
     fn to_phase(&self, current_sites: usize) -> anyhow::Result<Phase> {
+        // fade phase: hold sites, crossfade to original image
+        if let Some(fade_duration) = self.fade {
+            return Ok(Phase {
+                target_sites: None, doubling_time: 1.0,
+                duration: fade_duration, fade: true,
+            });
+        }
+
         match (self.n, self.dt, self.t) {
             // n + dt -> compute duration
             (Some(target), Some(doubling_time), None) => {
                 let num_doublings = (target as f64 / current_sites as f64).log2().abs();
                 let duration = num_doublings * doubling_time;
-                Ok(Phase { target_sites: Some(target), doubling_time, duration })
+                Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
             }
             // n + t -> compute doubling time
             (Some(target), None, Some(duration)) => {
                 let num_doublings = (target as f64 / current_sites as f64).log2().abs();
                 let doubling_time = if num_doublings > 0.0 { duration / num_doublings } else { 1.0 };
-                Ok(Phase { target_sites: Some(target), doubling_time, duration })
+                Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
             }
             // just t -> hold phase
             (None, _, Some(duration)) => {
-                Ok(Phase { target_sites: None, doubling_time: 1.0, duration })
+                Ok(Phase { target_sites: None, doubling_time: 1.0, duration, fade: false })
             }
             // all three -> use n + dt, warn if t inconsistent
             (Some(target), Some(doubling_time), Some(duration)) => {
@@ -130,10 +143,10 @@ impl PhaseSpec {
                         duration, computed, target, doubling_time, duration
                     );
                 }
-                Ok(Phase { target_sites: Some(target), doubling_time, duration })
+                Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
             }
             _ => anyhow::bail!(
-                "invalid phase: provide n+dt, n+t, or just t for hold. Got: {:?}",
+                "invalid phase: provide n+dt, n+t, t for hold, or fade. Got: {:?}",
                 self
             ),
         }
@@ -147,11 +160,12 @@ fn load_spec(path: &PathBuf) -> anyhow::Result<AnimSpec> {
         .with_context(|| format!("failed to parse spec file: {:?}", path))
 }
 
-/// Parse a phase spec string like "n=25600,dt=1" or "t=5"
+/// Parse a phase spec string like "n=25600,dt=1", "t=5", or "fade=1.5"
 fn parse_phase(spec: &str, current_sites: usize) -> anyhow::Result<Phase> {
     let mut n: Option<usize> = None;
     let mut dt: Option<f64> = None;
     let mut t: Option<f64> = None;
+    let mut fade: Option<f64> = None;
 
     for part in spec.split(',') {
         let part = part.trim();
@@ -161,9 +175,19 @@ fn parse_phase(spec: &str, current_sites: usize) -> anyhow::Result<Phase> {
             dt = Some(val.parse().context("invalid dt")?);
         } else if let Some(val) = part.strip_prefix("t=") {
             t = Some(val.parse().context("invalid t")?);
+        } else if let Some(val) = part.strip_prefix("fade=") {
+            fade = Some(val.parse().context("invalid fade")?);
         } else {
-            anyhow::bail!("unknown phase key in '{}' (expected n=, dt=, or t=)", part);
+            anyhow::bail!("unknown phase key in '{}' (expected n=, dt=, t=, or fade=)", part);
         }
+    }
+
+    // fade phase: hold sites, crossfade to original image
+    if let Some(fade_duration) = fade {
+        return Ok(Phase {
+            target_sites: None, doubling_time: 1.0,
+            duration: fade_duration, fade: true,
+        });
     }
 
     match (n, dt, t) {
@@ -171,17 +195,17 @@ fn parse_phase(spec: &str, current_sites: usize) -> anyhow::Result<Phase> {
         (Some(target), Some(doubling_time), None) => {
             let num_doublings = (target as f64 / current_sites as f64).log2().abs();
             let duration = num_doublings * doubling_time;
-            Ok(Phase { target_sites: Some(target), doubling_time, duration })
+            Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
         }
         // n + t -> compute doubling time
         (Some(target), None, Some(duration)) => {
             let num_doublings = (target as f64 / current_sites as f64).log2().abs();
             let doubling_time = if num_doublings > 0.0 { duration / num_doublings } else { 1.0 };
-            Ok(Phase { target_sites: Some(target), doubling_time, duration })
+            Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
         }
         // just t -> hold phase
         (None, _, Some(duration)) => {
-            Ok(Phase { target_sites: None, doubling_time: 1.0, duration })
+            Ok(Phase { target_sites: None, doubling_time: 1.0, duration, fade: false })
         }
         // all three -> use n + dt, warn if t inconsistent
         (Some(target), Some(doubling_time), Some(duration)) => {
@@ -193,10 +217,10 @@ fn parse_phase(spec: &str, current_sites: usize) -> anyhow::Result<Phase> {
                     duration, computed, target, doubling_time, duration
                 );
             }
-            Ok(Phase { target_sites: Some(target), doubling_time, duration })
+            Ok(Phase { target_sites: Some(target), doubling_time, duration, fade: false })
         }
         _ => anyhow::bail!(
-            "invalid phase '{}': provide n+dt, n+t, or just t for hold",
+            "invalid phase '{}': provide n+dt, n+t, t for hold, or fade",
             spec
         ),
     }
@@ -320,13 +344,17 @@ struct Args {
     #[arg(long, default_value = "0.0")]
     centroid_pull: f64,
 
-    /// Growth strategy: max | weighted | isolated | centroid | farthest
+    /// Growth strategy: max | weighted | isolated | centroid | farthest | poisson | poisson(k,lambda)
     #[arg(long, default_value = "max")]
     split_strategy: String,
 
     /// Use legacy multi-pass compute (for benchmarking vs merged single-pass)
     #[arg(long)]
     multi_pass: bool,
+
+    /// Log average site velocity (direction + magnitude) per frame to stderr
+    #[arg(long)]
+    log_velocity: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -461,6 +489,7 @@ fn main() -> anyhow::Result<()> {
             target_sites: Some(args.sites_end),
             doubling_time: args.doubling_time,
             duration: args.duration,
+            fade: false,
         }];
         (args.sites_start, args.fps, args.speed, args.seed, args.show_sites, args.centroid_pull, cli_split_strategy, phases)
     };
@@ -484,20 +513,27 @@ fn main() -> anyhow::Result<()> {
     // Print phase summary
     let mut phase_start_sites = sites_start;
     for (i, phase) in phases.iter().enumerate() {
-        match phase.target_sites {
-            Some(target) => {
-                let direction = if target > phase_start_sites { "grow" } else { "shrink" };
-                println!(
-                    "  Phase {}: {} {} -> {} sites over {:.1}s (dt={:.1}s)",
-                    i + 1, direction, phase_start_sites, target, phase.duration, phase.doubling_time
-                );
-                phase_start_sites = target;
-            }
-            None => {
-                println!(
-                    "  Phase {}: hold {} sites for {:.1}s",
-                    i + 1, phase_start_sites, phase.duration
-                );
+        if phase.fade {
+            println!(
+                "  Phase {}: fade to image over {:.1}s ({} sites)",
+                i + 1, phase.duration, phase_start_sites
+            );
+        } else {
+            match phase.target_sites {
+                Some(target) => {
+                    let direction = if target > phase_start_sites { "grow" } else { "shrink" };
+                    println!(
+                        "  Phase {}: {} {} -> {} sites over {:.1}s (dt={:.1}s)",
+                        i + 1, direction, phase_start_sites, target, phase.duration, phase.doubling_time
+                    );
+                    phase_start_sites = target;
+                }
+                None => {
+                    println!(
+                        "  Phase {}: hold {} sites for {:.1}s",
+                        i + 1, phase_start_sites, phase.duration
+                    );
+                }
             }
         }
     }
@@ -523,10 +559,11 @@ fn main() -> anyhow::Result<()> {
         let phase_frames = (phase.duration * fps as f64).round() as usize;
         let target = phase.target_sites.unwrap_or(sites.len());
 
-        // Reset fractional accumulator at phase boundary for clean transitions
+        // Track phase start state for continuous exponential targeting
+        let phase_start_count = sites.len() as f64;
         sites.fractional_sites = 0.0;
 
-        for _ in 0..phase_frames {
+        for frame_in_phase in 0..phase_frames {
             // Check for interrupt
             if interrupted.load(Ordering::Relaxed) {
                 progress.abandon_with_message("Interrupted");
@@ -552,6 +589,20 @@ fn main() -> anyhow::Result<()> {
 
             // Gradually adjust site count (skip if hold or already at target)
             if target != sites.len() {
+                // Compute where the continuous exponential says we should be,
+                // and inject any shortfall into fractional_sites so we catch up.
+                let elapsed = (frame_in_phase + 1) as f64 * dt;
+                let expected_count = if target > sites.len() {
+                    phase_start_count * 2.0_f64.powf(elapsed / phase.doubling_time)
+                } else {
+                    phase_start_count * 2.0_f64.powf(-elapsed / phase.doubling_time)
+                };
+                let expected_count = expected_count.min(target as f64).max(1.0);
+                let shortfall = expected_count - sites.len() as f64 - sites.fractional_sites;
+                if shortfall > 0.0 {
+                    sites.fractional_sites += shortfall;
+                }
+
                 sites.adjust_count(
                     target,
                     phase.doubling_time,
@@ -560,15 +611,30 @@ fn main() -> anyhow::Result<()> {
                     split_strategy,
                     Some(&result.cell_centroids),
                     Some(result.farthest_point),
+                    (width * height) as f64,
                 );
             }
 
-            // Render frame, optionally with site markers
+            // Render frame, optionally with site markers and fade blending
             let mut frame_image = result.to_image();
             if show_sites {
                 draw_sites(&mut frame_image, &positions);
             }
+            if phase.fade && phase_frames > 1 {
+                let blend_t = frame_in_phase as f32 / (phase_frames - 1) as f32;
+                blend_with_source(&mut frame_image, &image, blend_t);
+            }
             encoder.write_frame(frame_image.as_raw())?;
+
+            if args.log_velocity && frames_rendered % 30 == 0 {
+                let (vx, vy) = sites.avg_velocity();
+                let mag = (vx * vx + vy * vy).sqrt();
+                let angle_deg = vy.atan2(vx).to_degrees();
+                eprintln!(
+                    "frame {:5} | {:6} sites | avg_vel ({:+.4}, {:+.4}) mag={:.4} dir={:+.1}°",
+                    frames_rendered, n_sites, vx, vy, mag, angle_deg,
+                );
+            }
 
             let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
             frame_timings.push((frames_rendered, n_sites, frame_ms));
@@ -594,10 +660,22 @@ fn main() -> anyhow::Result<()> {
     let avg_fps = frames_rendered as f64 / total_wall.as_secs_f64();
 
     let partial = if interrupted.load(Ordering::Relaxed) { "partial" } else { "complete" };
+    let final_sites = sites.len();
+    let final_target = phases.iter().rev()
+        .find_map(|p| p.target_sites)
+        .unwrap_or(final_sites);
     println!(
         "Output saved to: {:?} ({} frames, {}{})",
         output, frames_rendered, partial, status_msg
     );
+    if final_sites != final_target {
+        println!(
+            "WARNING: final site count {} did not reach target {} ({:.1}% of target)",
+            final_sites, final_target, 100.0 * final_sites as f64 / final_target as f64,
+        );
+    } else {
+        println!("Final site count: {} (target reached)", final_sites);
+    }
     println!(
         "Render time: {:.1}s wall, {:.2} fps avg",
         total_wall.as_secs_f64(), avg_fps,
@@ -640,6 +718,16 @@ fn draw_sites(image: &mut image::RgbImage, sites: &[Position]) {
                 }
             }
         }
+    }
+}
+
+/// Per-pixel linear blend: frame = (1-t)*frame + t*source
+fn blend_with_source(frame: &mut image::RgbImage, source: &image::RgbImage, t: f32) {
+    let inv_t = 1.0 - t;
+    let frame_raw = frame.as_mut();
+    let source_raw = source.as_raw();
+    for (f, &s) in frame_raw.iter_mut().zip(source_raw.iter()) {
+        *f = (inv_t * *f as f32 + t * s as f32 + 0.5) as u8;
     }
 }
 

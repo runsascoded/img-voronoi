@@ -200,8 +200,9 @@ impl CpuBackend {
                         acc.r_sums[cell] += img_raw[px_offset] as u64;
                         acc.g_sums[cell] += img_raw[px_offset + 1] as u64;
                         acc.b_sums[cell] += img_raw[px_offset + 2] as u64;
-                        acc.x_sums[cell] += x as u64;
-                        acc.y_sums[cell] += y as u64;
+                        // Use pixel centers (matching nearest_site convention)
+                        acc.x_sums[cell] += 2 * x as u64 + 1;  // 2x+1 to store half-pixel in integer
+                        acc.y_sums[cell] += 2 * y as u64 + 1;
                         acc.areas[cell] += 1;
 
                         // Track farthest point (inline Phase 4)
@@ -236,8 +237,8 @@ impl CpuBackend {
                     (accum.b_sums[i] / count) as u8,
                 ]);
                 cell_centroids.push(Position::new(
-                    accum.x_sums[i] as f64 / count as f64,
-                    accum.y_sums[i] as f64 / count as f64,
+                    accum.x_sums[i] as f64 / (2.0 * count as f64),
+                    accum.y_sums[i] as f64 / (2.0 * count as f64),
                 ));
             } else {
                 cell_colors.push([128, 128, 128]);
@@ -312,8 +313,8 @@ impl CpuBackend {
                     r[cell] += pixel[0] as u64;
                     g[cell] += pixel[1] as u64;
                     b[cell] += pixel[2] as u64;
-                    cx[cell] += x as u64;
-                    cy[cell] += y as u64;
+                    cx[cell] += 2 * x as u64 + 1;
+                    cy[cell] += 2 * y as u64 + 1;
                     a[cell] += 1;
 
                     (r, g, b, cx, cy, a)
@@ -356,8 +357,8 @@ impl CpuBackend {
                     (b_sums[i] / count) as u8,
                 ]);
                 cell_centroids.push(Position::new(
-                    x_sums[i] as f64 / count as f64,
-                    y_sums[i] as f64 / count as f64,
+                    x_sums[i] as f64 / (2.0 * count as f64),
+                    y_sums[i] as f64 / (2.0 * count as f64),
                 ));
             } else {
                 cell_colors.push([128, 128, 128]);
@@ -491,6 +492,7 @@ mod tests {
                     target, doubling_time, dt, Some(areas),
                     SplitStrategy::Max, Some(&result.cell_centroids),
                     Some(result.farthest_point),
+                    (w * h) as f64,
                 );
                 if !added.is_empty() {
                     for &child_idx in &added {

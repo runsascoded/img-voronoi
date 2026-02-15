@@ -445,8 +445,8 @@ impl ComputeBackend for GpuBackend {
                 r_sums[cell_usize] += img_raw[px_offset] as u64;
                 g_sums[cell_usize] += img_raw[px_offset + 1] as u64;
                 b_sums[cell_usize] += img_raw[px_offset + 2] as u64;
-                x_sums[cell_usize] += x as u64;
-                y_sums[cell_usize] += y as u64;
+                x_sums[cell_usize] += 2 * x as u64 + 1;
+                y_sums[cell_usize] += 2 * y as u64 + 1;
                 cell_areas[cell_usize] += 1;
 
                 let fx = x as f64 + 0.5;
@@ -472,8 +472,8 @@ impl ComputeBackend for GpuBackend {
                     (b_sums[i] / count) as u8,
                 ]);
                 cell_centroids.push(Position::new(
-                    x_sums[i] as f64 / count as f64,
-                    y_sums[i] as f64 / count as f64,
+                    x_sums[i] as f64 / (2.0 * count as f64),
+                    y_sums[i] as f64 / (2.0 * count as f64),
                 ));
             } else {
                 cell_colors.push([128, 128, 128]);
