@@ -323,6 +323,10 @@ struct Args {
     /// Growth strategy: max | weighted | isolated | centroid | farthest
     #[arg(long, default_value = "max")]
     split_strategy: String,
+
+    /// Use legacy multi-pass compute (for benchmarking vs merged single-pass)
+    #[arg(long)]
+    multi_pass: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -367,6 +371,16 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Output path required (use -o/--output)"))?;
 
     // Create backend
+    let make_cpu = || -> Box<dyn ComputeBackend> {
+        if args.multi_pass {
+            println!("Using CPU backend (Rayon, multi-pass)");
+            Box::new(CpuBackend::new_multi_pass())
+        } else {
+            println!("Using CPU backend (Rayon, merged)");
+            Box::new(CpuBackend::new())
+        }
+    };
+
     #[cfg(feature = "gpu")]
     let mut backend: Box<dyn ComputeBackend> = if args.gpu {
         println!("Using GPU backend (wgpu)");
@@ -374,22 +388,19 @@ fn main() -> anyhow::Result<()> {
             Ok(gpu) => Box::new(gpu),
             Err(e) => {
                 eprintln!("Warning: GPU initialization failed: {}. Falling back to CPU.", e);
-                Box::new(CpuBackend::new())
+                make_cpu()
             }
         }
     } else {
-        println!("Using CPU backend (Rayon)");
-        Box::new(CpuBackend::new())
+        make_cpu()
     };
 
     #[cfg(not(feature = "gpu"))]
     let mut backend: Box<dyn ComputeBackend> = {
         if args.gpu {
             eprintln!("Warning: GPU feature not enabled. Using CPU backend.");
-        } else {
-            println!("Using CPU backend (Rayon)");
         }
-        Box::new(CpuBackend::new())
+        make_cpu()
     };
 
     // Single frame mode: render one frame and save as PNG
