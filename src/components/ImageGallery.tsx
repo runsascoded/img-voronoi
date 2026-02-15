@@ -28,12 +28,12 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
   const [isSupported] = useState(() => isOPFSSupported())
   const inputRef = useRef<HTMLInputElement>(null)
 
-  // Load images on mount
+  // Load images on mount and when currentImageId changes (new image stored)
   useEffect(() => {
     if (!isSupported) return
 
     getStoredImages().then(setImages)
-  }, [isSupported])
+  }, [isSupported, currentImageId])
 
   // Load thumbnails as images change
   useEffect(() => {

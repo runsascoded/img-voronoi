@@ -6,6 +6,7 @@ import { saveAs } from 'file-saver'
 import Tooltip from '@mui/material/Tooltip'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
+import { initWasm, VoronoiWasm } from '../voronoi/VoronoiWasm'
 import { ImageGallery, storeImage } from './ImageGallery'
 import { isOPFSSupported } from '../storage/ImageStorage'
 import sampleImage from '../assets/sample.jpg'
@@ -184,6 +185,7 @@ export function ImageVoronoi() {
   const webglRef = useRef<VoronoiWebGL | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const seedInputRef = useRef<HTMLInputElement>(null)
+  const filenameInputRef = useRef<HTMLInputElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [isDragging, setIsDragging] = useState(false)
   const [webglSupported, setWebglSupported] = useState(true)  // Detect on mount
@@ -208,16 +210,25 @@ export function ImageVoronoi() {
   const cellColorsRef = useRef<RGB[] | null>(null)
   const cellAreasRef = useRef<Uint32Array | null>(null)
 
+  // Computation result refs for WASM centroid pull
+  const cellCentroidsRef = useRef<Position[] | null>(null)
+  const farthestPointRef = useRef<Position | null>(null)
+
   // Site visualization
   const [showSites, setShowSites] = useState(false)
   const showSitesRef = useRef(false)
+  const [showVectors, setShowVectors] = useState(false)
+  const showVectorsRef = useRef(false)
 
-  // Edges-only mode (show original image with cell boundary lines)
-  const [showEdgesOnly, setShowEdgesOnly] = useState(false)
-  const showEdgesOnlyRef = useRef(false)
+  // Display toggles
+  const [showRegions, setShowRegions] = useState(true)
+  const showRegionsRef = useRef(true)
+  const [showEdges, setShowEdges] = useState(false)
+  const showEdgesRef = useRef(false)
 
   // Image metadata
   const [imageFilename, setImageFilename] = useState<string | null>(null)
+  const [downloadFormat, setDownloadFormat] = useState<'png' | 'jpeg'>('png')
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null)
   const [currentImageId, setCurrentImageId] = useState<string | undefined>(undefined)
 
@@ -229,6 +240,11 @@ export function ImageVoronoi() {
   // Current and target site counts for UI display during gradual growth
   const [currentSiteCount, setCurrentSiteCount] = useState(0)
   const [targetSiteCount, setTargetSiteCount] = useState(0)
+
+  // WASM backend
+  const wasmRef = useRef<VoronoiWasm | null>(null)
+  const [wasmReady, setWasmReady] = useState(false)
+  const wasmEnabledRef = useRef(false)  // Track useWasm for callbacks
 
   // Refs to track settings for callbacks
   const metricRef = useRef<DistanceMetric>('L2')
@@ -247,7 +263,11 @@ export function ImageVoronoi() {
     i: boolParam,          // inversePP
     v: intParam(15),       // speed (velocity, pixels/sec)
     g: boolParamDefaultTrue,  // WebGL (gpu acceleration, default true)
-    d: floatParam(0),      // doublingTime (seconds, 0 = instant/disabled)
+    d: floatParam({ default: 0, encoding: "string" }),      // doublingTime (seconds, 0 = instant/disabled)
+    w: boolParam,          // WASM backend (default false)
+    cp: floatParam({ default: 5, encoding: "string" }),     // centroid pull strength (for WASM physics)
+    th: floatParam({ default: 3, encoding: "string" }),     // O-U theta: mean reversion (higher = straighter paths)
+    si: floatParam({ default: 3, encoding: "string" }),     // O-U sigma: noise volatility (higher = more erratic)
   })
 
   const seed = values.s
@@ -256,6 +276,10 @@ export function ImageVoronoi() {
   const speed = values.v
   const useWebGL = values.g
   const doublingTime = values.d
+  const useWasm = values.w
+  const centroidPull = values.cp
+  const theta = values.th
+  const sigma = values.si
 
   // Gradual growth state (for smooth site count changes)
   const targetSitesRef = useRef<number>(numSites)  // Target we're growing/shrinking toward
@@ -264,6 +288,9 @@ export function ImageVoronoi() {
   // Session storage for large data (image + sites)
   const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
     defaultValue: DEFAULT_IMAGE_STATE,
+  })
+  const [storedScale, setStoredScale] = useSessionStorageState<number>('voronoi-scale', {
+    defaultValue: 1,
   })
   const { imageDataUrl, sites } = imageState
 
@@ -344,12 +371,24 @@ export function ImageVoronoi() {
   }, [useWebGL, webglSupported])
 
   useEffect(() => {
+    wasmEnabledRef.current = useWasm && wasmReady
+  }, [useWasm, wasmReady])
+
+  useEffect(() => {
     showSitesRef.current = showSites
   }, [showSites])
 
   useEffect(() => {
-    showEdgesOnlyRef.current = showEdgesOnly
-  }, [showEdgesOnly])
+    showVectorsRef.current = showVectors
+  }, [showVectors])
+
+  useEffect(() => {
+    showRegionsRef.current = showRegions
+  }, [showRegions])
+
+  useEffect(() => {
+    showEdgesRef.current = showEdges
+  }, [showEdges])
 
   // Sync targetSitesRef when numSites changes from slider or other direct updates
   useEffect(() => {
@@ -359,6 +398,16 @@ export function ImageVoronoi() {
       targetSitesRef.current = numSites
     }
   }, [numSites, doublingTime, isPlaying])
+
+  // Initialize WASM on mount
+  useEffect(() => {
+    initWasm()
+      .then(() => {
+        setWasmReady(true)
+        console.log('[WASM] Voronoi engine ready')
+      })
+      .catch((e) => console.warn('[WASM] Failed to initialize:', e))
+  }, [])
 
   // Detect WebGL support on mount
   useEffect(() => {
@@ -396,19 +445,35 @@ export function ImageVoronoi() {
     return webglRef.current
   }, [])
 
-  // Apply edges-only overlay if active (original image + boundary lines)
-  const applyEdgesOverlayIfActive = useCallback(() => {
-    if (!showEdgesOnlyRef.current || !cellOfRef.current || !originalImgDataRef.current) return
+  // Helper to ensure WASM engine is initialized with current image
+  const ensureWasm = useCallback((canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): VoronoiWasm | null => {
+    if (!wasmReady) return null
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    if (!wasmRef.current) {
+      wasmRef.current = new VoronoiWasm(imgData.data, canvas.width, canvas.height, seed)
+      console.log(`[WASM] engine created ${canvas.width}x${canvas.height}`)
+    } else {
+      wasmRef.current.setImage(imgData.data, canvas.width, canvas.height)
+    }
+    return wasmRef.current
+  }, [wasmReady, seed])
+
+  // Apply display overlays: hide regions if disabled, overlay edges if enabled
+  const applyDisplayOverlays = useCallback(() => {
     const canvas = canvasRef.current
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx) return
-    const { width, height } = canvas
-    const imgData = new ImageData(
-      new Uint8ClampedArray(originalImgDataRef.current.data),
-      width, height
-    )
-    applyEdgeOverlay(imgData.data, cellOfRef.current, width, height)
-    ctx.putImageData(imgData, 0, 0)
+
+    if (!showRegionsRef.current && originalImgDataRef.current) {
+      ctx.putImageData(originalImgDataRef.current, 0, 0)
+    }
+
+    if (showEdgesRef.current && cellOfRef.current) {
+      const { width, height } = canvas
+      const imgData = ctx.getImageData(0, 0, width, height)
+      applyEdgeOverlay(imgData.data, cellOfRef.current, width, height)
+      ctx.putImageData(imgData, 0, 0)
+    }
   }, [])
 
   const drawVoronoi = useCallback((
@@ -418,11 +483,32 @@ export function ImageVoronoi() {
     usePixels: boolean = true,
   ): Position[] => {
     if (usePixels) {
+      // Use WASM if enabled
+      if (wasmEnabledRef.current) {
+        const canvas = canvasRef.current
+        const ctx = canvas?.getContext('2d')
+        if (canvas && ctx) {
+          const wasm = ensureWasm(canvas, ctx)
+          if (wasm) {
+            const existingOrCached = existingSites || drawer.getSites()
+            const finalSites = existingOrCached.length === drawer.numSites
+              ? existingOrCached
+              : drawer.generateSites(seedVal)
+            wasm.setSites(finalSites, seedVal)
+            const result = wasm.compute()
+            cellOfRef.current = result.cellOf
+            cellColorsRef.current = result.cellColors
+            cellAreasRef.current = result.cellAreas
+            drawer.drawFromCellData(result.cellOf, result.cellColors, finalSites)
+            applyDisplayOverlays()
+            return finalSites
+          }
+        }
+      }
       // Use WebGL if enabled
       if (webglRef2.current) {
         const webgl = ensureWebGL()
         if (webgl) {
-          // Use existing sites, or get from drawer if count matches, otherwise regenerate
           const existingOrCached = existingSites || drawer.getSites()
           const finalSites = existingOrCached.length === drawer.numSites
             ? existingOrCached
@@ -436,12 +522,10 @@ export function ImageVoronoi() {
               cellOfRef.current = result.cellOf
               cellColorsRef.current = result.cellColors
               cellAreasRef.current = result.cellAreas
-
-              // Draw the result
               drawer.drawFromCellData(result.cellOf, result.cellColors, finalSites)
             }
           }
-          applyEdgesOverlayIfActive()
+          applyDisplayOverlays()
           return finalSites
         }
       }
@@ -457,9 +541,9 @@ export function ImageVoronoi() {
       cellOfRef.current = null
       cellColorsRef.current = null
     }
-    applyEdgesOverlayIfActive()
+    applyDisplayOverlays()
     return drawer.getSites()
-  }, [ensureWebGL, applyEdgesOverlayIfActive])
+  }, [ensureWebGL, ensureWasm, applyDisplayOverlays])
 
   // Compute available scale options based on original dimensions
   const getScaleOptions = useCallback((origWidth: number, origHeight: number) => {
@@ -511,6 +595,7 @@ export function ImageVoronoi() {
     // Update dimensions display
     setImageDimensions({ width: newWidth, height: newHeight })
     setImageScale(scale)
+    setStoredScale(scale)
 
     // Store scaled image data
     originalImgDataRef.current = ctx.getImageData(0, 0, newWidth, newHeight)
@@ -534,6 +619,8 @@ export function ImageVoronoi() {
       voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
       const newSites = drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
       setImageState(prev => ({ ...prev, sites: newSites }))
+      setCurrentSiteCount(newSites.length)
+      setTargetSiteCount(numSites)
 
       // Clear animation state since image changed
       animatedSitesRef.current = []
@@ -541,7 +628,7 @@ export function ImageVoronoi() {
       animationHistoryRef.current = []
       historyPositionRef.current = 0
     }
-  }, [numSites, inversePP, seed, drawVoronoi, setImageState])
+  }, [numSites, inversePP, seed, drawVoronoi, setImageState, setStoredScale])
 
   const drawImg = useCallback((
     image: HTMLImageElement,
@@ -581,11 +668,17 @@ export function ImageVoronoi() {
         // Store original full-resolution image
         originalImageRef.current = image
         setOriginalDimensions({ width: image.width, height: image.height })
-        setImageScale(1)
+        if (!src) setImageFilename('sample.jpg')
 
+        // Restore saved scale if != 1
+        if (storedScale !== 1) {
+          applyImageScale(storedScale)
+          return
+        }
+
+        setImageScale(1)
         imgRef.current = image
         setImageDimensions({ width: image.width, height: image.height })
-        if (!src) setImageFilename('sample.jpg')
         const newSites = drawImg(image, true, numSites, inversePP, seedVal, existingSites, pixelRenderingRef.current)
         setCurrentSiteCount(newSites.length)
         setTargetSiteCount(numSites)
@@ -626,6 +719,7 @@ export function ImageVoronoi() {
         originalImageRef.current = image
         setOriginalDimensions({ width: image.width, height: image.height })
         setImageScale(1)
+        setStoredScale(1)
 
         imgRef.current = image
         setImageFilename(file.name)
@@ -876,15 +970,19 @@ export function ImageVoronoi() {
     seedInputRef.current?.select()
   }
 
+  const downloadName = (imageFilename ?? 'voronoi').replace(/\.[^.]+$/, '')
+
   const downloadImage = () => {
     const canvas = canvasRef.current
     if (!canvas) return
 
+    const mimeType = downloadFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
+    const ext = downloadFormat === 'jpeg' ? 'jpg' : 'png'
     canvas.toBlob((blob) => {
       if (blob) {
-        saveAs(blob, 'voronoi.png')
+        saveAs(blob, `${downloadName}.${ext}`)
       }
-    })
+    }, mimeType, downloadFormat === 'jpeg' ? 0.92 : undefined)
   }
 
   // Animation functions
@@ -917,6 +1015,14 @@ export function ImageVoronoi() {
       return { x: Math.cos(angle), y: Math.sin(angle) }
     })
 
+    // Initialize WASM engine with current sites if enabled
+    if (wasmEnabledRef.current) {
+      const wasm = ensureWasm(canvas, ctx)
+      if (wasm) {
+        wasm.setSitesRandomVel(currentSites, seed)
+      }
+    }
+
     // Initialize current/target site counts
     setCurrentSiteCount(currentSites.length)
     setTargetSiteCount(targetSitesRef.current)
@@ -926,25 +1032,55 @@ export function ImageVoronoi() {
     historyPositionRef.current = 0
   }, [numSites])
 
-  // Draw site markers and velocity vectors on the canvas
+  // Draw site markers and optional velocity vectors on the canvas
   const drawSitesOverlay = useCallback((ctx: CanvasRenderingContext2D, sites: Position[], velocities?: Position[]) => {
-    if (!showSitesRef.current) return
-
-    const velocityScale = 20  // Length of velocity arrows
-
-    // Draw velocity vectors first (so dots are on top)
-    if (velocities && velocities.length === sites.length) {
-      ctx.strokeStyle = 'rgba(255, 100, 100, 0.8)'
+    // Draw velocity vectors (behind dots)
+    if (showVectorsRef.current && velocities && velocities.length === sites.length) {
+      const velocityScale = 20
+      const arrowWing = 4  // arrowhead wing length
+      const arrowAngle = Math.PI / 6  // ±30° from shaft
+      const colors = cellColorsRef.current
       ctx.lineWidth = 1.5
       for (let i = 0; i < sites.length; i++) {
         const site = sites[i]
         const vel = velocities[i]
+        const tipX = site.x + vel.x * velocityScale
+        const tipY = site.y + vel.y * velocityScale
+
+        // Contrast-aware color: white on dark cells, black on light
+        let strokeColor = 'rgba(255, 255, 255, 0.8)'
+        if (colors && colors[i]) {
+          const [r, g, b] = colors[i]
+          const lum = 0.299 * r + 0.587 * g + 0.114 * b
+          strokeColor = lum < 128 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)'
+        }
+        ctx.strokeStyle = strokeColor
+        ctx.fillStyle = strokeColor
+
+        // Draw shaft
         ctx.beginPath()
         ctx.moveTo(site.x, site.y)
-        ctx.lineTo(site.x + vel.x * velocityScale, site.y + vel.y * velocityScale)
+        ctx.lineTo(tipX, tipY)
         ctx.stroke()
+
+        // Draw arrowhead
+        const angle = Math.atan2(vel.y, vel.x)
+        ctx.beginPath()
+        ctx.moveTo(tipX, tipY)
+        ctx.lineTo(
+          tipX - arrowWing * Math.cos(angle - arrowAngle),
+          tipY - arrowWing * Math.sin(angle - arrowAngle),
+        )
+        ctx.lineTo(
+          tipX - arrowWing * Math.cos(angle + arrowAngle),
+          tipY - arrowWing * Math.sin(angle + arrowAngle),
+        )
+        ctx.closePath()
+        ctx.fill()
       }
     }
+
+    if (!showSitesRef.current) return
 
     // Draw site dots
     ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
@@ -958,7 +1094,7 @@ export function ImageVoronoi() {
     }
   }, [])
 
-  // Redraw when showSites or showEdgesOnly changes (if not animating)
+  // Redraw when display toggles change (if not animating)
   useEffect(() => {
     if (!isPlaying) {
       const canvas = canvasRef.current
@@ -974,12 +1110,12 @@ export function ImageVoronoi() {
           } else {
             drawer.fillVoronoi(currentSites)
           }
-          applyEdgesOverlayIfActive()
+          applyDisplayOverlays()
           drawSitesOverlay(ctx, currentSites, velocitiesRef.current)
         }
       }
     }
-  }, [showSites, showEdgesOnly, isPlaying, drawSitesOverlay, applyEdgesOverlayIfActive])
+  }, [showSites, showVectors, showRegions, showEdges, isPlaying, drawSitesOverlay, applyDisplayOverlays])
 
   // Render a specific frame (sites) without advancing physics
   const renderFrame = useCallback((sites: Position[]) => {
@@ -994,6 +1130,20 @@ export function ImageVoronoi() {
     ctx.putImageData(originalImgData, 0, 0)
 
     if (pixelRenderingRef.current) {
+      // Use WASM if enabled
+      if (wasmEnabledRef.current && wasmRef.current) {
+        wasmRef.current.setSites(sites, seed)
+        const result = wasmRef.current.compute()
+        cellOfRef.current = result.cellOf
+        cellColorsRef.current = result.cellColors
+        cellAreasRef.current = result.cellAreas
+        cellCentroidsRef.current = result.cellCentroids
+        farthestPointRef.current = result.farthestPoint
+        drawer.drawFromCellData(result.cellOf, result.cellColors, sites)
+        applyDisplayOverlays()
+        drawSitesOverlay(ctx, sites, velocitiesRef.current)
+        return
+      }
       // Use WebGL if enabled
       if (webglRef2.current) {
         const webgl = ensureWebGL()
@@ -1004,7 +1154,7 @@ export function ImageVoronoi() {
           cellColorsRef.current = result.cellColors
           cellAreasRef.current = result.cellAreas
           drawer.drawFromCellData(result.cellOf, result.cellColors, sites)
-          applyEdgesOverlayIfActive()
+          applyDisplayOverlays()
           drawSitesOverlay(ctx, sites, velocitiesRef.current)
           return
         }
@@ -1014,16 +1164,15 @@ export function ImageVoronoi() {
       if (result) {
         cellOfRef.current = result.cellOf
         cellColorsRef.current = result.cellColors
-        cellAreasRef.current = null  // CPU path doesn't compute areas yet
+        cellAreasRef.current = null
       }
     } else {
       drawer.fillVoronoi(sites)
     }
 
-    applyEdgesOverlayIfActive()
-    // Draw site markers if enabled
+    applyDisplayOverlays()
     drawSitesOverlay(ctx, sites, velocitiesRef.current)
-  }, [ensureWebGL, drawSitesOverlay, applyEdgesOverlayIfActive])
+  }, [ensureWebGL, drawSitesOverlay, applyDisplayOverlays, seed])
 
   const animationStep = useCallback((saveToHistory = true) => {
     const canvas = canvasRef.current
@@ -1045,6 +1194,81 @@ export function ImageVoronoi() {
       : 1 / 60  // Default to ~60fps for first frame
     lastFrameTimeRef.current = now
 
+    // WASM path: physics + compute handled by Rust engine
+    if (wasmEnabledRef.current && wasmRef.current) {
+      const wasm = wasmRef.current
+
+      // Physics step: O-U steering + centroid pull + edge bounce
+      const centroids = cellCentroidsRef.current ?? undefined
+      wasm.step(speed, deltaTime, centroids, centroidPull, theta, sigma)
+
+      // Gradual growth/shrink
+      if (doublingTime > 0 && targetSitesRef.current !== wasm.siteCount()) {
+        wasm.adjustCount(
+          targetSitesRef.current,
+          doublingTime,
+          deltaTime,
+          cellAreasRef.current ?? undefined,
+          'max',
+          centroids,
+          farthestPointRef.current ?? undefined,
+        )
+        if (drawer.numSites !== wasm.siteCount()) {
+          drawer.numSites = wasm.siteCount()
+          setCurrentSiteCount(wasm.siteCount())
+          if (wasm.siteCount() === targetSitesRef.current) {
+            setValues({ n: wasm.siteCount() })
+          }
+        }
+      }
+
+      // Compute Voronoi
+      const result = wasm.compute()
+      cellOfRef.current = result.cellOf
+      cellColorsRef.current = result.cellColors
+      cellAreasRef.current = result.cellAreas
+      cellCentroidsRef.current = result.cellCentroids
+      farthestPointRef.current = result.farthestPoint
+
+      // Read back positions and velocities for JS-side history/display
+      const positions = wasm.getPositions()
+      const wasmVelocities = wasm.getVelocities()
+      animatedSitesRef.current = positions
+      velocitiesRef.current = wasmVelocities
+
+      // Save to history
+      if (saveToHistory) {
+        const history = animationHistoryRef.current
+        const maxFrames = getMaxHistoryFrames()
+        if (historyPositionRef.current < history.length - 1) {
+          history.splice(historyPositionRef.current + 1)
+        }
+        history.push(positions.map(s => ({ ...s })))
+        historyPositionRef.current = history.length - 1
+        if (history.length > maxFrames) {
+          history.shift()
+          historyPositionRef.current--
+        }
+      }
+
+      // Render
+      ctx.putImageData(originalImgData, 0, 0)
+      drawer.drawFromCellData(result.cellOf, result.cellColors, positions)
+      applyDisplayOverlays()
+      drawSitesOverlay(ctx, positions, wasmVelocities)
+
+      // FPS
+      frameCountRef.current++
+      const fpsNow = performance.now()
+      if (fpsNow - fpsUpdateTimeRef.current >= 1000) {
+        setFps(Math.round(frameCountRef.current * 1000 / (fpsNow - fpsUpdateTimeRef.current)))
+        frameCountRef.current = 0
+        fpsUpdateTimeRef.current = fpsNow
+      }
+      return
+    }
+
+    // JS physics path
     // Movement amount: speed (pixels/sec) * deltaTime (sec) = pixels
     const movement = speed * deltaTime
 
@@ -1235,7 +1459,7 @@ export function ImageVoronoi() {
       drawer.fillVoronoi(animatedSites)
     }
 
-    applyEdgesOverlayIfActive()
+    applyDisplayOverlays()
     // Draw site markers if enabled
     drawSitesOverlay(ctx, animatedSites, velocities)
 
@@ -1247,12 +1471,15 @@ export function ImageVoronoi() {
       frameCountRef.current = 0
       fpsUpdateTimeRef.current = fpsNow
     }
-  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, setValues, drawSitesOverlay, applyEdgesOverlayIfActive])
+  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, centroidPull, theta, sigma, setValues, drawSitesOverlay, applyDisplayOverlays])
+
+  const animationStepRef = useRef(animationStep)
+  animationStepRef.current = animationStep
 
   const animate = useCallback(() => {
-    animationStep()
+    animationStepRef.current()
     animationFrameRef.current = requestAnimationFrame(animate)
-  }, [animationStep])
+  }, [])
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -1349,10 +1576,7 @@ export function ImageVoronoi() {
     )
     const pixels = imgData.data
 
-    if (showEdgesOnlyRef.current) {
-      // Edges-only: draw boundary lines on original image
-      applyEdgeOverlay(pixels, cellOf, width, height)
-    } else {
+    if (showRegionsRef.current) {
       // Color all pixels except the hovered cell
       for (let i = 0; i < numPixels; i++) {
         const cell = cellOf[i]
@@ -1362,9 +1586,12 @@ export function ImageVoronoi() {
           pixels[px] = r
           pixels[px + 1] = g
           pixels[px + 2] = b
-          // alpha stays the same
         }
       }
+    }
+
+    if (showEdgesRef.current) {
+      applyEdgeOverlay(pixels, cellOf, width, height)
     }
 
     // Draw black border around hovered cell (pixels near boundary)
@@ -1402,7 +1629,14 @@ export function ImageVoronoi() {
     }
 
     ctx.putImageData(imgData, 0, 0)
-  }, [])
+
+    // Re-draw sites on top of the hover render
+    const drawer = voronoiRef.current
+    if (drawer) {
+      const currentSites = animatedSitesRef.current.length > 0 ? animatedSitesRef.current : drawer.getSites()
+      drawSitesOverlay(ctx, currentSites, velocitiesRef.current)
+    }
+  }, [drawSitesOverlay])
 
   // Handle mouse move to detect hovered cell
   const handleCanvasMouseMove = useCallback((e: MouseEvent<HTMLCanvasElement>) => {
@@ -1446,12 +1680,16 @@ export function ImageVoronoi() {
     }
   }, [])
 
-  // Cleanup WebGL on unmount
+  // Cleanup WebGL and WASM on unmount
   useEffect(() => {
     return () => {
       if (webglRef.current) {
         webglRef.current.dispose()
         webglRef.current = null
+      }
+      if (wasmRef.current) {
+        wasmRef.current.dispose()
+        wasmRef.current = null
       }
     }
   }, [])
@@ -1479,7 +1717,7 @@ export function ImageVoronoi() {
   })
 
   useAction('voronoi:toggle-inverse', {
-    label: 'Toggle Inverse PP',
+    label: 'Toggle edge bias',
     group: 'Voronoi',
     defaultBindings: ['i'],
     handler: toggleInversePP,
@@ -1581,15 +1819,72 @@ export function ImageVoronoi() {
     handler: triggerUpload,
   })
 
-  const toggleEdgesOnly = useCallback(() => {
-    setShowEdgesOnly(prev => !prev)
+  const toggleEdges = useCallback(() => {
+    setShowEdges(prev => !prev)
   }, [])
 
-  useAction('voronoi:edges-only', {
-    label: 'Toggle edges only',
+  useAction('voronoi:toggle-edges', {
+    label: 'Toggle edge overlay',
     group: 'Voronoi',
     defaultBindings: ['e'],
-    handler: toggleEdgesOnly,
+    handler: toggleEdges,
+  })
+
+  const toggleRegions = useCallback(() => {
+    setShowRegions(prev => !prev)
+  }, [])
+
+  useAction('voronoi:toggle-regions', {
+    label: 'Toggle Voronoi regions',
+    group: 'Voronoi',
+    defaultBindings: ['r'],
+    handler: toggleRegions,
+  })
+
+  const toggleSites = useCallback(() => {
+    setShowSites(prev => !prev)
+  }, [])
+
+  useAction('voronoi:toggle-sites', {
+    label: 'Toggle site markers',
+    group: 'Voronoi',
+    defaultBindings: ['p'],
+    handler: toggleSites,
+  })
+
+  const toggleVectors = useCallback(() => {
+    setShowVectors(prev => !prev)
+  }, [])
+
+  useAction('voronoi:toggle-vectors', {
+    label: 'Toggle velocity vectors',
+    group: 'Voronoi',
+    defaultBindings: ['v'],
+    handler: toggleVectors,
+  })
+
+  const focusFilenameInput = useCallback(() => {
+    filenameInputRef.current?.focus()
+    filenameInputRef.current?.select()
+  }, [])
+
+  useAction('voronoi:rename', {
+    label: 'Rename image',
+    group: 'Voronoi',
+    defaultBindings: ['n'],
+    handler: focusFilenameInput,
+  })
+
+  const toggleWasm = useCallback(() => {
+    if (!wasmReady) return
+    setValues({ w: !useWasm })
+  }, [wasmReady, useWasm, setValues])
+
+  useAction('voronoi:toggle-wasm', {
+    label: 'Toggle WASM backend',
+    group: 'Voronoi',
+    defaultBindings: ['w'],
+    handler: toggleWasm,
   })
 
   // Handle selecting an image from the gallery
@@ -1604,6 +1899,7 @@ export function ImageVoronoi() {
       originalImageRef.current = image
       setOriginalDimensions({ width: image.width, height: image.height })
       setImageScale(1)
+      setStoredScale(1)
 
       imgRef.current = image
       setImageFilename(basename)
@@ -1706,7 +2002,14 @@ export function ImageVoronoi() {
         {imageDimensions && (
           <div className="control-group image-info">
             <span className="image-meta">
-              {imageFilename && <span className="image-filename">{imageFilename}</span>}
+              <input
+                ref={filenameInputRef}
+                className="image-filename-input"
+                type="text"
+                value={imageFilename ?? 'voronoi'}
+                onChange={(e) => setImageFilename(e.target.value)}
+                title="Image name (used for downloads)"
+              />
               <span className="image-dims">{imageDimensions.width}×{imageDimensions.height}</span>
               <span className="image-pixels">{(imageDimensions.width * imageDimensions.height / 1e6).toFixed(2)}MP</span>
             </span>
@@ -1715,7 +2018,7 @@ export function ImageVoronoi() {
                 <select
                   className="scale-select"
                   value={imageScale}
-                  onChange={(e) => applyImageScale(parseFloat(e.target.value))}
+                  onChange={(e) => { applyImageScale(parseFloat(e.target.value)); e.target.blur() }}
                 >
                   {getScaleOptions(originalDimensions.width, originalDimensions.height).map(opt => (
                     <option key={opt.scale} value={opt.scale}>
@@ -1799,6 +2102,61 @@ export function ImageVoronoi() {
           </div>
         </Tooltip>
 
+        {/* Centroid pull slider (visible when WASM is enabled) */}
+        {useWasm && wasmReady && (
+          <Tooltip title="Centroid pull — Lloyd's relaxation strength (0 = off)" arrow>
+            <div className="control-group slider-group">
+              <label className="control-label">Pull</label>
+              <input
+                className="control-slider"
+                type="range"
+                value={centroidPull}
+                min="0"
+                max="20"
+                step="0.5"
+                onChange={(e) => setValues({ cp: parseFloat(e.target.value) })}
+              />
+              <span className="control-number">{centroidPull > 0 ? centroidPull : 'off'}</span>
+            </div>
+          </Tooltip>
+        )}
+
+        {/* O-U steering sliders (visible when WASM is enabled) */}
+        {useWasm && wasmReady && (
+          <Tooltip title="Mean reversion — higher = straighter paths (O-U θ)" arrow>
+            <div className="control-group slider-group">
+              <label className="control-label">Drift</label>
+              <input
+                className="control-slider"
+                type="range"
+                value={theta}
+                min="0"
+                max="10"
+                step="0.5"
+                onChange={(e) => setValues({ th: parseFloat(e.target.value) })}
+              />
+              <span className="control-number">{theta > 0 ? theta : 'off'}</span>
+            </div>
+          </Tooltip>
+        )}
+        {useWasm && wasmReady && (
+          <Tooltip title="Random steering — higher = more erratic turns (O-U σ)" arrow>
+            <div className="control-group slider-group">
+              <label className="control-label">Wander</label>
+              <input
+                className="control-slider"
+                type="range"
+                value={sigma}
+                min="0"
+                max="10"
+                step="0.5"
+                onChange={(e) => setValues({ si: parseFloat(e.target.value) })}
+              />
+              <span className="control-number">{sigma > 0 ? sigma : 'off'}</span>
+            </div>
+          </Tooltip>
+        )}
+
         {/* Seed input */}
         <Tooltip title="Random seed for site placement (F to focus)" arrow>
           <div className="control-group">
@@ -1843,7 +2201,47 @@ export function ImageVoronoi() {
           </label>
         </Tooltip>
 
-        <Tooltip title="Show site markers and velocity vectors" arrow>
+        <Tooltip title={wasmReady ? 'WASM backend — Rust compute + O-U physics (W)' : 'WASM loading...'} arrow>
+          <label
+            className="selection-label"
+            style={wasmReady ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
+          >
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={useWasm && wasmReady}
+              onChange={() => setValues({ w: !useWasm })}
+              disabled={!wasmReady}
+            />
+            {' '}WASM
+          </label>
+        </Tooltip>
+
+        <Tooltip title="Show Voronoi cell colors (R)" arrow>
+          <label className="selection-label">
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={showRegions}
+              onChange={() => setShowRegions(!showRegions)}
+            />
+            {' '}Regions
+          </label>
+        </Tooltip>
+
+        <Tooltip title="Overlay cell boundary lines (E)" arrow>
+          <label className="selection-label">
+            <input
+              className="checkbox"
+              type="checkbox"
+              checked={showEdges}
+              onChange={() => setShowEdges(!showEdges)}
+            />
+            {' '}Edges
+          </label>
+        </Tooltip>
+
+        <Tooltip title="Show site markers (P)" arrow>
           <label className="selection-label">
             <input
               className="checkbox"
@@ -1855,15 +2253,15 @@ export function ImageVoronoi() {
           </label>
         </Tooltip>
 
-        <Tooltip title="Show original image with cell boundaries (E)" arrow>
+        <Tooltip title="Show velocity vectors (V)" arrow>
           <label className="selection-label">
             <input
               className="checkbox"
               type="checkbox"
-              checked={showEdgesOnly}
-              onChange={() => setShowEdgesOnly(!showEdgesOnly)}
+              checked={showVectors}
+              onChange={() => setShowVectors(!showVectors)}
             />
-            {' '}Edges
+            {' '}Vectors
           </label>
         </Tooltip>
 
@@ -1880,6 +2278,16 @@ export function ImageVoronoi() {
                 className="file-input"
               />
             </label>
+          </Tooltip>
+          <Tooltip title="Download format" arrow>
+            <select
+              className="format-select"
+              value={downloadFormat}
+              onChange={(e) => { setDownloadFormat(e.target.value as 'png' | 'jpeg'); e.target.blur() }}
+            >
+              <option value="png">PNG</option>
+              <option value="jpeg">JPG</option>
+            </select>
           </Tooltip>
           <Tooltip title="Download image (S)" arrow>
             <button className="icon-button" onClick={handleDownload}>
