@@ -263,11 +263,11 @@ export function ImageVoronoi() {
     s: intParam(0),        // seed (default 0, omitted from URL)
     n: intParam(400),      // numSites
     i: boolParam,          // inversePP
-    v: intParam(15),       // speed (velocity, pixels/sec)
+    v: intParam(25),       // speed (velocity, pixels/sec)
     g: boolParamDefaultTrue,  // WebGL (gpu acceleration, default true)
     d: floatParam({ default: 0, encoding: "string" }),      // doublingTime (seconds, 0 = instant/disabled)
-    w: boolParam,          // WASM backend (default false)
-    cp: floatParam({ default: 5, encoding: "string" }),     // centroid pull strength (for WASM physics)
+    w: boolParamDefaultTrue,  // WASM backend (default true)
+    cp: floatParam({ default: 2, encoding: "string" }),     // centroid pull strength (for WASM physics)
     th: floatParam({ default: 3, encoding: "string" }),     // O-U theta: mean reversion (higher = straighter paths)
     si: floatParam({ default: 3, encoding: "string" }),     // O-U sigma: noise volatility (higher = more erratic)
   })
