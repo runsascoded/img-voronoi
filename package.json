@@ -18,8 +18,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sobel": "^0.0.11",
-    "use-kbd": "github:runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d",
-    "use-prms": "github:runsascoded/use-prms#36c2ddcaa1d23d8c4901b2769bac3ce69528691a",
+    "use-kbd": "https://github.com/runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d",
+    "use-prms": "https://github.com/runsascoded/use-prms#36c2ddcaa1d23d8c4901b2769bac3ce69528691a",
     "use-session-storage-state": "^19.0.1",
     "voronoi": "^1.0.0"
   },
