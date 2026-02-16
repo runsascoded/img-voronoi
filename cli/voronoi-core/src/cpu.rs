@@ -63,6 +63,7 @@ impl RowAccum {
         }
     }
 
+    #[cfg(feature = "parallel")]
     fn merge(mut self, other: Self) -> Self {
         let n = self.r_sums.len();
         for i in 0..n {
