@@ -230,7 +230,9 @@ export function ImageVoronoi() {
   const [imageFilename, setImageFilename] = useState<string | null>(null)
   const [downloadFormat, setDownloadFormat] = useState<'png' | 'jpeg'>('png')
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null)
-  const [currentImageId, setCurrentImageId] = useState<string | undefined>(undefined)
+  const [currentImageId, setCurrentImageId] = useSessionStorageState<string | undefined>('voronoi-image-id', {
+    defaultValue: undefined,
+  })
 
   // Image scaling - store original full-res and current scale
   const [originalDimensions, setOriginalDimensions] = useState<{ width: number; height: number } | null>(null)
@@ -289,9 +291,14 @@ export function ImageVoronoi() {
   const [imageState, setImageState] = useSessionStorageState<ImageState>('voronoi-image', {
     defaultValue: DEFAULT_IMAGE_STATE,
   })
-  const [storedScale, setStoredScale] = useSessionStorageState<number>('voronoi-scale', {
-    defaultValue: 1,
+  const [scaleMap, setScaleMap] = useSessionStorageState<Record<string, number>>('voronoi-scales', {
+    defaultValue: {},
   })
+  const scaleKey = currentImageId ?? '_default'
+  const storedScale = scaleMap[scaleKey] ?? 1
+  const setStoredScale = useCallback((scale: number) => {
+    setScaleMap(prev => ({ ...prev, [scaleKey]: scale }))
+  }, [scaleKey, setScaleMap])
   const { imageDataUrl, sites } = imageState
 
   // Push current state to history
@@ -630,6 +637,25 @@ export function ImageVoronoi() {
     }
   }, [numSites, inversePP, seed, drawVoronoi, setImageState, setStoredScale])
 
+  // Stop animation loop and reset animation/WASM state (for image switches)
+  const stopAndResetAnimation = useCallback(() => {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
+    }
+    setIsPlaying(false)
+    setFps(0)
+    animatedSitesRef.current = []
+    velocitiesRef.current = []
+    animationHistoryRef.current = []
+    historyPositionRef.current = 0
+    lastFrameTimeRef.current = 0
+    if (wasmRef.current) {
+      wasmRef.current.dispose()
+      wasmRef.current = null
+    }
+  }, [])
+
   const drawImg = useCallback((
     image: HTMLImageElement,
     fileChanged: boolean,
@@ -708,6 +734,7 @@ export function ImageVoronoi() {
 
   const loadImageFromFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) return
+    stopAndResetAnimation()
 
     const reader = new FileReader()
     reader.onload = (event) => {
@@ -740,7 +767,7 @@ export function ImageVoronoi() {
       }
     }
     reader.readAsDataURL(file)
-  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory])
+  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory, stopAndResetAnimation])
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -1889,7 +1916,12 @@ export function ImageVoronoi() {
 
   // Handle selecting an image from the gallery
   const handleSelectFromGallery = useCallback((blob: Blob, basename: string, id?: string) => {
+    stopAndResetAnimation()
     if (id) setCurrentImageId(id)
+
+    // Look up saved scale for this image
+    const imageScaleKey = id ?? '_default'
+    const savedScale = scaleMap[imageScaleKey] ?? 1
 
     const url = URL.createObjectURL(blob)
     const image = new Image()
@@ -1898,11 +1930,24 @@ export function ImageVoronoi() {
       // Store original full-resolution image
       originalImageRef.current = image
       setOriginalDimensions({ width: image.width, height: image.height })
-      setImageScale(1)
-      setStoredScale(1)
-
-      imgRef.current = image
       setImageFilename(basename)
+
+      // Restore saved scale if != 1
+      if (savedScale !== 1) {
+        applyImageScale(savedScale)
+        // Convert blob to data URL for session storage
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          const dataUrl = e.target?.result as string
+          setImageState(prev => ({ ...prev, imageDataUrl: dataUrl }))
+          URL.revokeObjectURL(url)
+        }
+        reader.readAsDataURL(blob)
+        return
+      }
+
+      setImageScale(1)
+      imgRef.current = image
       setImageDimensions({ width: image.width, height: image.height })
 
       // Convert blob to data URL for session storage
@@ -1919,7 +1964,7 @@ export function ImageVoronoi() {
     image.onerror = () => {
       URL.revokeObjectURL(url)
     }
-  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory])
+  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, applyImageScale, stopAndResetAnimation])
 
 
   const toggleWebGL = useCallback(() => {
