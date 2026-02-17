@@ -672,19 +672,25 @@ export function ImageVoronoi() {
     // Capture clean scaled image as data URL before Voronoi overwrites canvas
     const scaledDataUrl = canvas.toDataURL()
 
-    // Remap existing sites proportionally
-    const ratioX = newWidth / oldWidth
-    const ratioY = newHeight / oldHeight
-    const clampX = (v: number) => Math.max(0, Math.min(newWidth - 1, Math.round(v)))
-    const clampY = (v: number) => Math.max(0, Math.min(newHeight - 1, Math.round(v)))
-    const remap = (sites: Position[]) => sites.map(s => ({ x: clampX(s.x * ratioX), y: clampY(s.y * ratioY) }))
-
+    // Remap existing sites proportionally (skip when canvas has default/uninitialized dims,
+    // e.g. on page refresh — session-storage sites are already at the correct scale)
     let remappedSites: Position[] | undefined
-    if (animatedSitesRef.current.length > 0) {
-      remappedSites = remap(animatedSitesRef.current)
-      animatedSitesRef.current = remappedSites
+    const canvasWasInitialized = oldWidth > 1 && oldHeight > 1 && oldWidth !== 300
+    if (canvasWasInitialized && (oldWidth !== newWidth || oldHeight !== newHeight)) {
+      const ratioX = newWidth / oldWidth
+      const ratioY = newHeight / oldHeight
+      const clampX = (v: number) => Math.max(0, Math.min(newWidth - 1, Math.round(v)))
+      const clampY = (v: number) => Math.max(0, Math.min(newHeight - 1, Math.round(v)))
+      const remap = (sites: Position[]) => sites.map(s => ({ x: clampX(s.x * ratioX), y: clampY(s.y * ratioY) }))
+      if (animatedSitesRef.current.length > 0) {
+        remappedSites = remap(animatedSitesRef.current)
+        animatedSitesRef.current = remappedSites
+      } else if (imageState.sites.length > 0) {
+        remappedSites = remap(imageState.sites)
+      }
     } else if (imageState.sites.length > 0) {
-      remappedSites = remap(imageState.sites)
+      // Sites from session storage are already at the correct scale
+      remappedSites = imageState.sites
     }
     // Reset animation history to single frame of remapped positions
     if (remappedSites) {
