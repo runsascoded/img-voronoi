@@ -1,4 +1,5 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { useAction, useActions } from 'use-kbd'
 import Tooltip from '@mui/material/Tooltip'
 import {
   StoredImage,
@@ -136,6 +137,36 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
     const imgs = await getStoredImages()
     setImages(imgs)
   }, [])
+
+  // Register gallery toggle shortcut
+  useAction('gallery:toggle', {
+    label: collapsed ? 'Expand gallery' : 'Collapse gallery',
+    group: 'Gallery',
+    defaultBindings: ['\\'],
+    handler: toggleCollapsed,
+  })
+
+  // Register omnibar-searchable actions for each gallery image
+  const handleSelectRef = useRef(handleSelect)
+  handleSelectRef.current = handleSelect
+  const imageActions = useMemo(() =>
+    Object.fromEntries(
+      images.map(img => [
+        `gallery:image:${img.id}`,
+        {
+          label: img.basename,
+          description: `${img.originalWidth}×${img.originalHeight}`,
+          group: 'Gallery',
+          defaultBindings: [] as string[],
+          hideFromModal: true,
+          keywords: ['image', 'gallery', img.basename],
+          handler: () => handleSelectRef.current(img),
+        },
+      ])
+    ),
+    [images],
+  )
+  useActions(imageActions)
 
   if (!isSupported) {
     return null
