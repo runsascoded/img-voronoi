@@ -8,7 +8,7 @@ Interactive Voronoi diagram visualization from images. Dual-platform: **React/Vi
 src/                          # Web app (React/TS/Vite)
   components/
     ImageVoronoi.tsx          # Main UI: canvas, controls, animation, image loading
-    ImageGallery.tsx           # OPFS-backed image gallery
+    ImageGallery.tsx           # Always-visible collapsible image gallery
   voronoi/
     VoronoiDrawer.ts          # CPU Voronoi (bucket-queue flood fill)
     VoronoiWebGL.ts           # WebGL acceleration (cone rendering)
@@ -29,9 +29,13 @@ cli/                          # Rust CLI
 ## Web App
 
 - Dev server: port **5184** (`pnpm dev`)
-- URL params via `use-prms/hash`: `s` (seed), `n` (sites), `i` (inverse), `v` (speed), `g` (WebGL), `d` (doubling time)
+- Deployed to **[voro.rbw.sh]** via GitHub Pages (GHA builds WASM + Vite)
+- URL params via `use-prms/hash`: `s` (seed), `n` (sites), `i` (inverse), `v` (speed), `g` (WebGL), `d` (doubling time), `w` (WASM), `cp` (centroid pull), `th` (O-U theta), `si` (O-U sigma)
 - Keyboard shortcuts via `use-kbd`
 - MUI Tooltips throughout
+- Gallery sidebar (always visible, collapsible): OPFS-backed image storage with thumbnails, auto-seeds `sample.jpg`/`sample2.jpg` on first visit
+
+[voro.rbw.sh]: https://voro.rbw.sh
 
 ## CLI
 
