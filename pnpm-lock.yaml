@@ -30,8 +30,8 @@ importers:
         specifier: ^0.0.11
         version: 0.0.11
       use-kbd:
-        specifier: https://github.com/runsascoded/use-kbd#ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d
-        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d(react@18.3.1)
+        specifier: https://github.com/runsascoded/use-kbd#a1cf5d11b6f1bd1b9ef7fdb15066c4c4139ca2ce
+        version: https://codeload.github.com/runsascoded/use-kbd/tar.gz/a1cf5d11b6f1bd1b9ef7fdb15066c4c4139ca2ce(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       use-prms:
         specifier: https://github.com/runsascoded/use-prms#36c2ddcaa1d23d8c4901b2769bac3ce69528691a
         version: https://codeload.github.com/runsascoded/use-prms/tar.gz/36c2ddcaa1d23d8c4901b2769bac3ce69528691a(react@18.3.1)
@@ -2225,11 +2225,12 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d:
-    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d}
-    version: 0.9.0-dist.ed55f15
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/a1cf5d11b6f1bd1b9ef7fdb15066c4c4139ca2ce:
+    resolution: {tarball: https://codeload.github.com/runsascoded/use-kbd/tar.gz/a1cf5d11b6f1bd1b9ef7fdb15066c4c4139ca2ce}
+    version: 0.9.0-dist.6fd6a13
     peerDependencies:
       react: '>=18.0.0'
+      react-dom: '>=18.0.0'
 
   use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/36c2ddcaa1d23d8c4901b2769bac3ce69528691a:
     resolution: {tarball: https://codeload.github.com/runsascoded/use-prms/tar.gz/36c2ddcaa1d23d8c4901b2769bac3ce69528691a}
@@ -4567,9 +4568,10 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/ef61cfe3ae08b5a29e7a37889c33fdca1db4e03d(react@18.3.1):
+  use-kbd@https://codeload.github.com/runsascoded/use-kbd/tar.gz/a1cf5d11b6f1bd1b9ef7fdb15066c4c4139ca2ce(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
     dependencies:
       react: 18.3.1
+      react-dom: 18.3.1(react@18.3.1)
 
   use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/36c2ddcaa1d23d8c4901b2769bac3ce69528691a(react@18.3.1):
     dependencies:
