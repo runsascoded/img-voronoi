@@ -240,6 +240,17 @@ export async function deleteImage(id: string): Promise<void> {
 }
 
 /**
+ * Store an image from a URL (e.g. a Vite asset import).
+ * Fetches the URL, creates a File, and delegates to storeImage.
+ */
+export async function storeImageFromUrl(url: string, basename: string): Promise<StoredImage> {
+  const response = await fetch(url)
+  const blob = await response.blob()
+  const file = new File([blob], `${basename}.jpg`, { type: blob.type || 'image/jpeg' })
+  return storeImage(file)
+}
+
+/**
  * Check if OPFS is supported
  */
 export function isOPFSSupported(): boolean {

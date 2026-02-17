@@ -11,6 +11,8 @@ import {
 } from '../storage/ImageStorage'
 import './ImageGallery.css'
 
+const COLLAPSED_KEY = 'voronoi-gallery-collapsed'
+
 interface ImageGalleryProps {
   onSelectImage: (blob: Blob, basename: string, id?: string) => void
   currentImageId?: string
@@ -26,7 +28,16 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isSupported] = useState(() => isOPFSSupported())
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === '1')
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsed(prev => {
+      const next = !prev
+      localStorage.setItem(COLLAPSED_KEY, next ? '1' : '0')
+      return next
+    })
+  }, [])
 
   // Load images on mount and when currentImageId changes (new image stored)
   useEffect(() => {
@@ -127,72 +138,82 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
   }, [])
 
   if (!isSupported) {
-    return null // OPFS not supported, don't show gallery
-  }
-
-  if (images.length === 0) {
-    return null // No images stored yet
+    return null
   }
 
   return (
-    <div className="image-gallery">
+    <div className={`image-gallery${collapsed ? ' collapsed' : ''}`}>
       <div className="gallery-header">
-        <span className="gallery-title">Gallery</span>
-        <Tooltip title="Refresh gallery" placement="top" arrow>
-          <button className="gallery-refresh" onClick={refreshImages}>
-            ↻
-          </button>
-        </Tooltip>
+        {!collapsed && <span className="gallery-title">Gallery</span>}
+        <div className="gallery-header-buttons">
+          {!collapsed && (
+            <Tooltip title="Refresh gallery" placement="top" arrow>
+              <button className="gallery-refresh" onClick={refreshImages}>
+                ↻
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip title={collapsed ? 'Expand gallery' : 'Collapse gallery'} placement="right" arrow>
+            <button className="gallery-toggle" onClick={toggleCollapsed}>
+              {collapsed ? '›' : '‹'}
+            </button>
+          </Tooltip>
+        </div>
       </div>
-      <div className="gallery-items">
-        {images.map((img) => (
-          <div
-            key={img.id}
-            className={`gallery-item ${currentImageId === img.id ? 'active' : ''}`}
-            onClick={() => handleSelect(img)}
-          >
-            <div className="gallery-thumbnail">
-              {thumbnails[img.id] ? (
-                <img src={thumbnails[img.id]} alt={img.basename} />
-              ) : (
-                <div className="thumbnail-placeholder">...</div>
-              )}
-              <Tooltip title="Delete" placement="top" arrow>
-                <button
-                  className="gallery-delete"
-                  onClick={(e) => handleDelete(e, img.id)}
-                >
-                  ×
-                </button>
-              </Tooltip>
-            </div>
-            <div className="gallery-info">
-              {editingId === img.id ? (
-                <input
-                  ref={inputRef}
-                  className="gallery-edit-input"
-                  value={editValue}
-                  onChange={(e) => setEditValue(e.target.value)}
-                  onBlur={handleSaveEdit}
-                  onKeyDown={handleKeyDown}
-                />
-              ) : (
-                <Tooltip title="Click to edit name" placement="bottom" arrow>
-                  <span
-                    className="gallery-basename"
-                    onClick={(e) => handleStartEdit(e, img)}
+      {!collapsed && (
+        <div className="gallery-items">
+          {images.length === 0 && (
+            <div className="gallery-empty">No images</div>
+          )}
+          {images.map((img) => (
+            <div
+              key={img.id}
+              className={`gallery-item ${currentImageId === img.id ? 'active' : ''}`}
+              onClick={() => handleSelect(img)}
+            >
+              <div className="gallery-thumbnail">
+                {thumbnails[img.id] ? (
+                  <img src={thumbnails[img.id]} alt={img.basename} />
+                ) : (
+                  <div className="thumbnail-placeholder">...</div>
+                )}
+                <Tooltip title="Delete" placement="top" arrow>
+                  <button
+                    className="gallery-delete"
+                    onClick={(e) => handleDelete(e, img.id)}
                   >
-                    {img.basename}
-                  </span>
+                    ×
+                  </button>
                 </Tooltip>
-              )}
-              <span className="gallery-dims">
-                {img.originalWidth}×{img.originalHeight}
-              </span>
+              </div>
+              <div className="gallery-info">
+                {editingId === img.id ? (
+                  <input
+                    ref={inputRef}
+                    className="gallery-edit-input"
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onBlur={handleSaveEdit}
+                    onKeyDown={handleKeyDown}
+                  />
+                ) : (
+                  <Tooltip title="Click to edit name" placement="bottom" arrow>
+                    <span
+                      className="gallery-basename"
+                      onClick={(e) => handleStartEdit(e, img)}
+                    >
+                      {img.basename}
+                    </span>
+                  </Tooltip>
+                )}
+                <span className="gallery-dims">
+                  {img.originalWidth}×{img.originalHeight}
+                </span>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

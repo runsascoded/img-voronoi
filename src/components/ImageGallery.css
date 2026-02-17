@@ -10,6 +10,11 @@
   flex-direction: column;
   z-index: 50;
   overflow: hidden;
+  transition: width 0.2s ease;
+}
+
+.image-gallery.collapsed {
+  width: 28px;
 }
 
 .gallery-header {
@@ -19,6 +24,17 @@
   padding: 8px 10px;
   border-bottom: 1px solid #3a7982;
   flex-shrink: 0;
+}
+
+.collapsed .gallery-header {
+  padding: 8px 4px;
+  justify-content: center;
+}
+
+.gallery-header-buttons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .gallery-title {
@@ -44,6 +60,23 @@
   color: #fff;
 }
 
+.gallery-toggle {
+  background: none;
+  border: none;
+  color: #5ab;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: background-color 0.15s, color 0.15s;
+  line-height: 1;
+}
+
+.gallery-toggle:hover {
+  background: rgba(90, 170, 187, 0.2);
+  color: #fff;
+}
+
 .gallery-items {
   flex: 1;
   overflow-y: auto;
@@ -52,6 +85,13 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.gallery-empty {
+  font-size: 10px;
+  color: #6a9;
+  text-align: center;
+  padding: 16px 4px;
 }
 
 .gallery-item {
@@ -177,16 +217,22 @@
 }
 
 /* Adjust main content when gallery is visible */
-body:has(.image-gallery) .IV {
+body:has(.image-gallery:not(.collapsed)) .IV {
   margin-left: 120px;
+  transition: margin-left 0.2s ease;
+}
+
+body:has(.image-gallery.collapsed) .IV {
+  margin-left: 28px;
+  transition: margin-left 0.2s ease;
 }
 
 @media all and (max-width: 600px) {
-  .image-gallery {
+  .image-gallery:not(.collapsed) {
     width: 100px;
   }
 
-  body:has(.image-gallery) .IV {
+  body:has(.image-gallery:not(.collapsed)) .IV {
     margin-left: 100px;
   }
 }

@@ -8,8 +8,9 @@ import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawe
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
 import { initWasm, VoronoiWasm } from '../voronoi/VoronoiWasm'
 import { ImageGallery, storeImage } from './ImageGallery'
-import { isOPFSSupported } from '../storage/ImageStorage'
+import { isOPFSSupported, getStoredImages, getImageBlob, storeImageFromUrl } from '../storage/ImageStorage'
 import sampleImage from '../assets/sample.jpg'
+import sampleImage2 from '../assets/sample2.jpg'
 import './ImageVoronoi.css'
 
 // Boolean param that defaults to true (param absent = true, param present = false)
@@ -406,6 +407,24 @@ export function ImageVoronoi() {
     }
   }, [numSites, doublingTime, isPlaying])
 
+  // Seed sample images into OPFS on first visit
+  const seedingRef = useRef(false)
+  useEffect(() => {
+    if (!isOPFSSupported() || seedingRef.current) return
+    seedingRef.current = true
+
+    getStoredImages().then(async (images) => {
+      if (images.length > 0) return
+      try {
+        const stored1 = await storeImageFromUrl(sampleImage, 'sample')
+        await storeImageFromUrl(sampleImage2, 'sample2')
+        setCurrentImageId(stored1.id)
+      } catch (e) {
+        console.warn('[OPFS] Failed to seed samples:', e)
+      }
+    })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Initialize WASM on mount
   useEffect(() => {
     initWasm()
@@ -687,14 +706,18 @@ export function ImageVoronoi() {
 
   // Load image and render on mount
   useEffect(() => {
-    const loadAndDraw = (src: string | null, seedVal: number, existingSites?: Position[]) => {
+    const loadAndDraw = (src: string | null, seedVal: number, basename?: string, existingSites?: Position[]) => {
       const image = new Image()
       image.src = src || sampleImage
       image.onload = () => {
         // Store original full-resolution image
         originalImageRef.current = image
         setOriginalDimensions({ width: image.width, height: image.height })
-        if (!src) setImageFilename('sample.jpg')
+        if (basename) {
+          setImageFilename(basename)
+        } else if (!src) {
+          setImageFilename('sample.jpg')
+        }
 
         // Restore saved scale if != 1
         if (storedScale !== 1) {
@@ -726,7 +749,20 @@ export function ImageVoronoi() {
     }
 
     if (imageDataUrl) {
-      loadAndDraw(imageDataUrl, seed, sites.length > 0 ? sites : undefined)
+      loadAndDraw(imageDataUrl, seed, undefined, sites.length > 0 ? sites : undefined)
+    } else if (isOPFSSupported() && currentImageId) {
+      // Try loading current gallery image from OPFS
+      getImageBlob(currentImageId).then((blob) => {
+        if (blob) {
+          const url = URL.createObjectURL(blob)
+          getStoredImages().then((images) => {
+            const meta = images.find(img => img.id === currentImageId)
+            loadAndDraw(url, seed, meta?.basename)
+          })
+        } else {
+          loadAndDraw(null, seed)
+        }
+      })
     } else {
       loadAndDraw(null, seed)
     }
