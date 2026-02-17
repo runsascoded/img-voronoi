@@ -17,13 +17,14 @@ const COLLAPSED_KEY = 'voronoi-gallery-collapsed'
 interface ImageGalleryProps {
   onSelectImage: (blob: Blob, basename: string, id?: string) => void
   currentImageId?: string
+  galleryVersion?: number
 }
 
 interface ThumbnailCache {
   [id: string]: string
 }
 
-export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProps) {
+export function ImageGallery({ onSelectImage, currentImageId, galleryVersion }: ImageGalleryProps) {
   const [images, setImages] = useState<StoredImage[]>([])
   const [thumbnails, setThumbnails] = useState<ThumbnailCache>({})
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -45,7 +46,7 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
     if (!isSupported) return
 
     getStoredImages().then(setImages)
-  }, [isSupported, currentImageId])
+  }, [isSupported, currentImageId, galleryVersion])
 
   // Load thumbnails as images change
   useEffect(() => {
@@ -146,6 +147,30 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
     handler: toggleCollapsed,
   })
 
+  // Gallery prev/next shortcuts
+  useAction('gallery:prev', {
+    label: 'Previous gallery image',
+    group: 'Gallery',
+    defaultBindings: ['alt+ArrowUp'],
+    handler: () => {
+      if (images.length === 0) return
+      const idx = images.findIndex(img => img.id === currentImageId)
+      const prev = idx <= 0 ? images.length - 1 : idx - 1
+      handleSelect(images[prev])
+    },
+  })
+  useAction('gallery:next', {
+    label: 'Next gallery image',
+    group: 'Gallery',
+    defaultBindings: ['alt+ArrowDown'],
+    handler: () => {
+      if (images.length === 0) return
+      const idx = images.findIndex(img => img.id === currentImageId)
+      const next = idx < 0 || idx >= images.length - 1 ? 0 : idx + 1
+      handleSelect(images[next])
+    },
+  })
+
   // Register omnibar-searchable actions for each gallery image
   const handleSelectRef = useRef(handleSelect)
   handleSelectRef.current = handleSelect
@@ -197,8 +222,9 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
             <div className="gallery-empty">No images</div>
           )}
           {images.map((img) => (
-            <div
+            <button
               key={img.id}
+              type="button"
               className={`gallery-item ${currentImageId === img.id ? 'active' : ''}`}
               onClick={() => handleSelect(img)}
             >
@@ -209,12 +235,14 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
                   <div className="thumbnail-placeholder">...</div>
                 )}
                 <Tooltip title="Delete" placement="top" arrow>
-                  <button
+                  <span
+                    role="button"
+                    tabIndex={-1}
                     className="gallery-delete"
                     onClick={(e) => handleDelete(e, img.id)}
                   >
                     ×
-                  </button>
+                  </span>
                 </Tooltip>
               </div>
               <div className="gallery-info">
@@ -241,7 +269,7 @@ export function ImageGallery({ onSelectImage, currentImageId }: ImageGalleryProp
                   {img.originalWidth}×{img.originalHeight}
                 </span>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       )}

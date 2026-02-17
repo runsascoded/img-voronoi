@@ -8,7 +8,7 @@ import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawe
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
 import { initWasm, VoronoiWasm } from '../voronoi/VoronoiWasm'
 import { ImageGallery, storeImage } from './ImageGallery'
-import { isOPFSSupported, getStoredImages, getImageBlob, storeImageFromUrl } from '../storage/ImageStorage'
+import { isOPFSSupported, getStoredImages, getImageBlob, storeImageFromUrl, updateImageBasename } from '../storage/ImageStorage'
 import sampleImage from '../assets/sample.jpg'
 import sampleImage2 from '../assets/sample2.jpg'
 import './ImageVoronoi.css'
@@ -234,6 +234,7 @@ export function ImageVoronoi() {
   const [currentImageId, setCurrentImageId] = useSessionStorageState<string | undefined>('voronoi-image-id', {
     defaultValue: undefined,
   })
+  const [galleryVersion, setGalleryVersion] = useState(0)
 
   // Image scaling - store original full-res and current scale
   const [originalDimensions, setOriginalDimensions] = useState<{ width: number; height: number } | null>(null)
@@ -748,21 +749,22 @@ export function ImageVoronoi() {
       }
     }
 
-    if (imageDataUrl) {
-      loadAndDraw(imageDataUrl, seed, undefined, sites.length > 0 ? sites : undefined)
-    } else if (isOPFSSupported() && currentImageId) {
-      // Try loading current gallery image from OPFS
+    if (isOPFSSupported() && currentImageId) {
+      // Always prefer OPFS as source of truth when we have a currentImageId
       getImageBlob(currentImageId).then((blob) => {
         if (blob) {
           const url = URL.createObjectURL(blob)
           getStoredImages().then((images) => {
             const meta = images.find(img => img.id === currentImageId)
-            loadAndDraw(url, seed, meta?.basename)
+            loadAndDraw(url, seed, meta?.basename, sites.length > 0 ? sites : undefined)
           })
         } else {
-          loadAndDraw(null, seed)
+          // Image missing from OPFS, fall back to session data URL or sample
+          loadAndDraw(imageDataUrl, seed, undefined, sites.length > 0 ? sites : undefined)
         }
       })
+    } else if (imageDataUrl) {
+      loadAndDraw(imageDataUrl, seed, undefined, sites.length > 0 ? sites : undefined)
     } else {
       loadAndDraw(null, seed)
     }
@@ -2057,6 +2059,7 @@ export function ImageVoronoi() {
       <ImageGallery
         onSelectImage={handleSelectFromGallery}
         currentImageId={currentImageId}
+        galleryVersion={galleryVersion}
       />
       <div
         className={`IV${isDragging ? ' dragging' : ''}`}
@@ -2089,6 +2092,14 @@ export function ImageVoronoi() {
                 type="text"
                 value={imageFilename ?? 'voronoi'}
                 onChange={(e) => setImageFilename(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                onBlur={async (e) => {
+                  const name = e.target.value.trim()
+                  if (name && currentImageId) {
+                    await updateImageBasename(currentImageId, name)
+                    setGalleryVersion(v => v + 1)
+                  }
+                }}
                 title="Image name (used for downloads)"
               />
               <span className="image-dims">{imageDimensions.width}×{imageDimensions.height}</span>
