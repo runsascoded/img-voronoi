@@ -1,7 +1,7 @@
-import { useRef, useEffect, useCallback, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
+import { useRef, useEffect, useCallback, useMemo, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
 import { useUrlStates, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
-import { useAction } from 'use-kbd'
+import { useAction, useActions } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import Tooltip from '@mui/material/Tooltip'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
@@ -574,35 +574,69 @@ export function ImageVoronoi() {
 
   // Compute available scale options based on original dimensions
   const getScaleOptions = useCallback((origWidth: number, origHeight: number) => {
-    const options: { label: string; scale: number; dims: string }[] = []
+    const namedFractions: [number, number, string][] = [
+      [1, 1, '1×'], [7, 8, '⅞×'], [3, 4, '¾×'], [5, 8, '⅝×'],
+      [1, 2, '½×'], [3, 8, '⅜×'], [1, 3, '⅓×'], [1, 4, '¼×'],
+      [1, 5, '⅕×'], [1, 6, '⅙×'], [1, 8, '⅛×'],
+    ]
 
-    // Full resolution
-    options.push({ label: '1×', scale: 1, dims: `${origWidth}×${origHeight}` })
+    // Keyed by "w×h" string; named fractions added first so they win
+    const seen = new Map<string, { label: string; scale: number; dims: string }>()
 
-    // 3/4 scale if both dimensions are multiples of 4
-    if (origWidth % 4 === 0 && origHeight % 4 === 0) {
-      const w = Math.round(origWidth * 0.75)
-      const h = Math.round(origHeight * 0.75)
-      options.push({ label: '¾×', scale: 0.75, dims: `${w}×${h}` })
+    for (const [num, den, label] of namedFractions) {
+      const w = Math.round(origWidth * num / den)
+      const h = Math.round(origHeight * num / den)
+      if (w < 100 || h < 100) continue
+      const dims = `${w}×${h}`
+      const actualScale = w / origWidth
+      if (!seen.has(dims)) seen.set(dims, { label, scale: actualScale, dims })
     }
 
-    // Power of 2 downscales
-    let scale = 0.5
-    while (scale >= 0.125) {  // Down to 1/8
-      const w = Math.round(origWidth * scale)
-      const h = Math.round(origHeight * scale)
-      if (w >= 100 && h >= 100) {  // Minimum useful size
-        const label = scale === 0.5 ? '½×' : scale === 0.25 ? '¼×' : `1/${Math.round(1/scale)}×`
-        options.push({ label, scale, dims: `${w}×${h}` })
+    // Round-number dimensions: every width that's a multiple of 100, and every 50px step on the larger axis
+    const largerDim = Math.max(origWidth, origHeight)
+    const steps = new Set<number>()
+    // Multiples of 100 on width
+    for (let w = Math.floor(origWidth / 100) * 100; w >= 100; w -= 100) {
+      steps.add(w / origWidth)
+    }
+    // Multiples of 50 on larger dimension
+    for (let d = Math.floor(largerDim / 50) * 50; d >= 100; d -= 50) {
+      steps.add(d / largerDim)
+    }
+
+    for (const s of steps) {
+      const w = Math.round(origWidth * s)
+      const h = Math.round(origHeight * s)
+      if (w < 100 || h < 100) continue
+      const dims = `${w}×${h}`
+      if (!seen.has(dims)) {
+        const pct = Math.round(s * 100)
+        seen.set(dims, { label: `${pct}%`, scale: w / origWidth, dims })
       }
-      scale /= 2
     }
 
-    return options
+    // Sort descending by scale, filter neighbors within 2%
+    const sorted = [...seen.values()].sort((a, b) => b.scale - a.scale)
+    const filtered: typeof sorted = []
+    for (const opt of sorted) {
+      if (filtered.length > 0) {
+        const prev = filtered[filtered.length - 1]
+        if (Math.abs(prev.scale - opt.scale) / prev.scale < 0.10) continue
+      }
+      filtered.push(opt)
+    }
+
+    return filtered
   }, [])
 
-  // Apply scale to the original image and redraw
-  const applyImageScale = useCallback((scale: number) => {
+  const scaleOptions = useMemo(
+    () => originalDimensions ? getScaleOptions(originalDimensions.width, originalDimensions.height) : [],
+    [originalDimensions, getScaleOptions],
+  )
+
+  // Apply scale to the original image and redraw, preserving site positions
+  // forImageId: override which image's scale map entry to update (for gallery switches)
+  const applyImageScale = useCallback((scale: number, forImageId?: string) => {
     const origImg = originalImageRef.current
     if (!origImg) return
 
@@ -612,50 +646,103 @@ export function ImageVoronoi() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    const oldWidth = canvas.width
+    const oldHeight = canvas.height
+
     const newWidth = Math.round(origImg.width * scale)
     const newHeight = Math.round(origImg.height * scale)
+    // Use actual scale from rounded dimensions so it matches dropdown options
+    const actualScale = newWidth / origImg.width
 
+    // Resize canvas and draw scaled image
     canvas.width = newWidth
     canvas.height = newHeight
     ctx.drawImage(origImg, 0, 0, newWidth, newHeight)
 
-    // Update dimensions display
+    // Update state
     setImageDimensions({ width: newWidth, height: newHeight })
-    setImageScale(scale)
-    setStoredScale(scale)
+    setImageScale(actualScale)
+    // Save to the correct image's scale map entry
+    const key = forImageId ?? scaleKey
+    setScaleMap(prev => ({ ...prev, [key]: actualScale }))
 
-    // Store scaled image data
+    // Store scaled image data (from clean canvas, before Voronoi draw)
     originalImgDataRef.current = ctx.getImageData(0, 0, newWidth, newHeight)
 
-    // Create scaled image element for imgRef
-    const scaledImg = new Image()
-    scaledImg.width = newWidth
-    scaledImg.height = newHeight
-    const dataUrl = canvas.toDataURL()
-    scaledImg.src = dataUrl
-    scaledImg.onload = () => {
-      imgRef.current = scaledImg
+    // Capture clean scaled image as data URL before Voronoi overwrites canvas
+    const scaledDataUrl = canvas.toDataURL()
 
-      // Reinitialize WebGL with new dimensions
-      if (webglRef.current) {
-        webglRef.current.dispose()
-        webglRef.current = null
-      }
+    // Remap existing sites proportionally
+    const ratioX = newWidth / oldWidth
+    const ratioY = newHeight / oldHeight
+    const clampX = (v: number) => Math.max(0, Math.min(newWidth - 1, Math.round(v)))
+    const clampY = (v: number) => Math.max(0, Math.min(newHeight - 1, Math.round(v)))
+    const remap = (sites: Position[]) => sites.map(s => ({ x: clampX(s.x * ratioX), y: clampY(s.y * ratioY) }))
 
-      // Reinitialize Voronoi drawer and redraw
-      voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
-      const newSites = drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
-      setImageState(prev => ({ ...prev, sites: newSites }))
-      setCurrentSiteCount(newSites.length)
-      setTargetSiteCount(numSites)
-
-      // Clear animation state since image changed
-      animatedSitesRef.current = []
-      velocitiesRef.current = []
-      animationHistoryRef.current = []
+    let remappedSites: Position[] | undefined
+    if (animatedSitesRef.current.length > 0) {
+      remappedSites = remap(animatedSitesRef.current)
+      animatedSitesRef.current = remappedSites
+    } else if (imageState.sites.length > 0) {
+      remappedSites = remap(imageState.sites)
+    }
+    // Reset animation history to single frame of remapped positions
+    if (remappedSites) {
+      animationHistoryRef.current = [remappedSites.map(s => ({ ...s }))]
       historyPositionRef.current = 0
     }
-  }, [numSites, inversePP, seed, drawVoronoi, setImageState, setStoredScale])
+
+    // Dispose WASM and WebGL engines synchronously (ensureWasm/ensureWebGL recreate on next draw)
+    if (wasmRef.current) {
+      wasmRef.current.dispose()
+      wasmRef.current = null
+    }
+    if (webglRef.current) {
+      webglRef.current.dispose()
+      webglRef.current = null
+    }
+
+    // Redraw Voronoi synchronously (canvas still has clean scaled image for WASM/WebGL to read)
+    voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
+    const newSites = drawVoronoi(voronoiRef.current, seed, remappedSites, pixelRenderingRef.current)
+    setImageState(prev => ({ ...prev, sites: newSites }))
+    setCurrentSiteCount(newSites.length)
+    setTargetSiteCount(numSites)
+
+    // Update imgRef asynchronously (for future drawImg calls)
+    const scaledImg = new Image()
+    scaledImg.src = scaledDataUrl
+    scaledImg.onload = () => { imgRef.current = scaledImg }
+  }, [numSites, inversePP, seed, drawVoronoi, setImageState, scaleKey, setScaleMap, imageState.sites])
+
+  // Register omnibar-searchable actions for each scale option
+  const applyImageScaleRef = useRef(applyImageScale)
+  applyImageScaleRef.current = applyImageScale
+  const scaleActions = useMemo(() => {
+    if (scaleOptions.length < 2) return {}
+    const origW = originalDimensions?.width
+    const origH = originalDimensions?.height
+    if (!origW || !origH) return {}
+    return Object.fromEntries(
+      scaleOptions.map(opt => {
+        const [w, h] = opt.dims.split('×')
+        const pct = Math.round(opt.scale * 100)
+        return [
+          `scale:${opt.dims}`,
+          {
+            label: `Scale to ${opt.label}`,
+            description: `${opt.dims}`,
+            group: 'Scale',
+            defaultBindings: [] as string[],
+            hideFromModal: true,
+            keywords: ['scale', 'resize', w, h, opt.label, `${pct}%`, `${pct}`],
+            handler: () => applyImageScaleRef.current(opt.scale),
+          },
+        ]
+      })
+    )
+  }, [scaleOptions, originalDimensions])
+  useActions(scaleActions)
 
   // Stop animation loop and reset animation/WASM state (for image switches)
   const stopAndResetAnimation = useCallback(() => {
@@ -1034,6 +1121,16 @@ export function ImageVoronoi() {
     seedInputRef.current?.focus()
     seedInputRef.current?.select()
   }
+
+  const applyScaleByDim = useCallback((num: number, mode: 'w' | 'h') => {
+    if (!originalDimensions || num <= 0) return
+    const { width: origW, height: origH } = originalDimensions
+    const dim = mode === 'w' ? origW : origH
+    // ≤4 → fraction of full scale; >4 → target pixels
+    let scale = num <= 4 ? num : num / dim
+    scale = Math.max(100 / Math.max(origW, origH), Math.min(1, scale))
+    applyImageScale(scale)
+  }, [originalDimensions, applyImageScale])
 
   const downloadName = (imageFilename ?? 'voronoi').replace(/\.[^.]+$/, '')
 
@@ -1948,8 +2045,22 @@ export function ImageVoronoi() {
   useAction('voronoi:toggle-wasm', {
     label: 'Toggle WASM backend',
     group: 'Voronoi',
-    defaultBindings: ['w'],
+    defaultBindings: ['shift+w'],
     handler: toggleWasm,
+  })
+
+  useAction('voronoi:scale-width', {
+    label: 'Scale by width',
+    group: 'Scale',
+    defaultBindings: ['\\f w', 'w \\f'],
+    handler: (_e: unknown, captures?: number[]) => { captures && applyScaleByDim(captures[0], 'w') },
+  })
+
+  useAction('voronoi:scale-height', {
+    label: 'Scale by height',
+    group: 'Scale',
+    defaultBindings: ['\\f h', 'h \\f'],
+    handler: (_e: unknown, captures?: number[]) => { captures && applyScaleByDim(captures[0], 'h') },
   })
 
   // Handle selecting an image from the gallery
@@ -1972,7 +2083,7 @@ export function ImageVoronoi() {
 
       // Restore saved scale if != 1
       if (savedScale !== 1) {
-        applyImageScale(savedScale)
+        applyImageScale(savedScale, imageScaleKey)
         // Convert blob to data URL for session storage
         const reader = new FileReader()
         reader.onload = (e) => {
@@ -2027,6 +2138,30 @@ export function ImageVoronoi() {
     group: 'Voronoi',
     defaultBindings: ['g'],
     handler: toggleWebGL,
+  })
+
+  useAction('voronoi:scale-up', {
+    label: 'Increase image scale',
+    group: 'Voronoi',
+    defaultBindings: ['shift+ArrowUp'],
+    handler: () => {
+      if (scaleOptions.length < 2) return
+      // Find first preset larger than current scale (list is descending, so last match)
+      const larger = scaleOptions.filter(o => o.scale > imageScale + 0.001)
+      if (larger.length > 0) applyImageScale(larger[larger.length - 1].scale)
+    },
+  })
+
+  useAction('voronoi:scale-down', {
+    label: 'Decrease image scale',
+    group: 'Voronoi',
+    defaultBindings: ['shift+ArrowDown'],
+    handler: () => {
+      if (scaleOptions.length < 2) return
+      // Find first preset smaller than current scale (list is descending)
+      const target = scaleOptions.find(o => o.scale < imageScale - 0.001)
+      if (target) applyImageScale(target.scale)
+    },
   })
 
   // SVG icons
@@ -2105,18 +2240,23 @@ export function ImageVoronoi() {
               <span className="image-dims">{imageDimensions.width}×{imageDimensions.height}</span>
               <span className="image-pixels">{(imageDimensions.width * imageDimensions.height / 1e6).toFixed(2)}MP</span>
             </span>
-            {originalDimensions && originalDimensions.width > 400 && (
-              <Tooltip title="Downscale image for better performance" arrow>
+            {scaleOptions.length > 1 && (
+              <Tooltip title="Image scale (Shift+↑/↓, #w, #h)" arrow>
                 <select
                   className="scale-select"
                   value={imageScale}
                   onChange={(e) => { applyImageScale(parseFloat(e.target.value)); e.target.blur() }}
                 >
-                  {getScaleOptions(originalDimensions.width, originalDimensions.height).map(opt => (
+                  {scaleOptions.map(opt => (
                     <option key={opt.scale} value={opt.scale}>
                       {opt.label} ({opt.dims})
                     </option>
                   ))}
+                  {!scaleOptions.some(o => Math.abs(o.scale - imageScale) < 0.001) && imageDimensions && (
+                    <option value={imageScale}>
+                      {Math.round(imageScale * 100)}% ({imageDimensions.width}×{imageDimensions.height})
+                    </option>
+                  )}
                 </select>
               </Tooltip>
             )}
