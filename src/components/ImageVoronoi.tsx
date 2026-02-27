@@ -150,6 +150,27 @@ function mergeSites(sites: Position[], targetCount: number): Position[] {
   return removeWithSpatialAwareness(result, toRemove)
 }
 
+const MAX_DEFAULT_PIXELS = 800_000
+
+function pickDefaultScale(
+  origW: number, origH: number,
+  scaleOptions: { scale: number }[],
+  displayScale?: 'auto' | number,
+): number {
+  let budget = MAX_DEFAULT_PIXELS
+  if (typeof displayScale === 'number') {
+    const displayPixels = Math.round(origW * displayScale) * Math.round(origH * displayScale)
+    budget = Math.min(budget, displayPixels)
+  }
+  if (origW * origH <= budget) return 1
+  for (const opt of scaleOptions) {
+    const w = Math.round(origW * opt.scale)
+    const h = Math.round(origH * opt.scale)
+    if (w * h <= budget) return opt.scale
+  }
+  return scaleOptions[scaleOptions.length - 1]?.scale ?? 1
+}
+
 /**
  * Detect cell boundary pixels and set them to black in-place.
  * A pixel is a boundary if any 4-connected neighbor has a different cell.
@@ -297,7 +318,15 @@ export function ImageVoronoi() {
     defaultValue: {},
   })
   const scaleKey = currentImageId ?? '_default'
+  const hasStoredScale = scaleKey in scaleMap
   const storedScale = scaleMap[scaleKey] ?? 1
+
+  // Display scale: 'auto' = CSS-flow (max-width/max-height), number = fraction of original dims
+  const [displayScale, setDisplayScale] = useState<'auto' | number>('auto')
+  const [displayScaleMap, setDisplayScaleMap] = useSessionStorageState<Record<string, 'auto' | number>>(
+    'voronoi-display-scales', { defaultValue: {} }
+  )
+  const storedDisplayScale = displayScaleMap[scaleKey] ?? 'auto'
   const setStoredScale = useCallback((scale: number) => {
     setScaleMap(prev => ({ ...prev, [scaleKey]: scale }))
   }, [scaleKey, setScaleMap])
@@ -634,6 +663,22 @@ export function ImageVoronoi() {
     [originalDimensions, getScaleOptions],
   )
 
+  const displayScaleOptions = useMemo(() => {
+    if (!originalDimensions) return [{ label: 'Auto', value: 'auto' as const }]
+    const { width: origW, height: origH } = originalDimensions
+    const opts: { label: string; value: 'auto' | number }[] = [
+      { label: 'Auto', value: 'auto' },
+    ]
+    const fractions: [number, string][] = [[1, '1\u00d7'], [0.75, '\u00be\u00d7'], [0.5, '\u00bd\u00d7'], [0.25, '\u00bc\u00d7']]
+    if (origW < 1200) fractions.unshift([2, '2\u00d7'])
+    for (const [s, lbl] of fractions) {
+      const w = Math.round(origW * s), h = Math.round(origH * s)
+      if (w < 50 || h < 50) continue
+      opts.push({ label: `${lbl} (${w}\u00d7${h})`, value: s })
+    }
+    return opts
+  }, [originalDimensions])
+
   // Apply scale to the original image and redraw, preserving site positions
   // forImageId: override which image's scale map entry to update (for gallery switches)
   const applyImageScale = useCallback((scale: number, forImageId?: string) => {
@@ -813,10 +858,22 @@ export function ImageVoronoi() {
           setImageFilename('sample.jpg')
         }
 
-        // Restore saved scale if != 1
-        if (storedScale !== 1) {
+        // Restore saved display scale
+        setDisplayScale(storedDisplayScale)
+
+        // Restore saved compute scale if explicitly stored and != 1
+        if (hasStoredScale && storedScale !== 1) {
           applyImageScale(storedScale)
           return
+        }
+        // Smart default for images with no stored scale
+        if (!hasStoredScale) {
+          const opts = getScaleOptions(image.width, image.height)
+          const defaultScale = pickDefaultScale(image.width, image.height, opts, storedDisplayScale)
+          if (defaultScale !== 1) {
+            applyImageScale(defaultScale)
+            return
+          }
         }
 
         setImageScale(1)
@@ -2074,9 +2131,12 @@ export function ImageVoronoi() {
     stopAndResetAnimation()
     if (id) setCurrentImageId(id)
 
-    // Look up saved scale for this image
+    // Look up saved scales for this image
     const imageScaleKey = id ?? '_default'
+    const imageHasStoredScale = imageScaleKey in scaleMap
     const savedScale = scaleMap[imageScaleKey] ?? 1
+    const savedDisplayScale = displayScaleMap[imageScaleKey] ?? 'auto'
+    setDisplayScale(savedDisplayScale)
 
     const url = URL.createObjectURL(blob)
     const image = new Image()
@@ -2087,31 +2147,29 @@ export function ImageVoronoi() {
       setOriginalDimensions({ width: image.width, height: image.height })
       setImageFilename(basename)
 
-      // Restore saved scale if != 1
-      if (savedScale !== 1) {
-        applyImageScale(savedScale, imageScaleKey)
-        // Convert blob to data URL for session storage
-        const reader = new FileReader()
-        reader.onload = (e) => {
-          const dataUrl = e.target?.result as string
-          setImageState(prev => ({ ...prev, imageDataUrl: dataUrl }))
-          URL.revokeObjectURL(url)
-        }
-        reader.readAsDataURL(blob)
-        return
+      // Determine effective scale: stored > smart default > 1
+      let effectiveScale = savedScale
+      if (!imageHasStoredScale) {
+        const opts = getScaleOptions(image.width, image.height)
+        effectiveScale = pickDefaultScale(image.width, image.height, opts, savedDisplayScale)
       }
 
-      setImageScale(1)
-      imgRef.current = image
-      setImageDimensions({ width: image.width, height: image.height })
+      if (effectiveScale !== 1) {
+        applyImageScale(effectiveScale, imageScaleKey)
+      } else {
+        setImageScale(1)
+        imgRef.current = image
+        setImageDimensions({ width: image.width, height: image.height })
+        const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
+        setImageState({ imageDataUrl: null, sites: newSites })
+        pushHistory({ imageDataUrl: null, sites: newSites, seed, numSites, inversePP })
+      }
 
-      // Convert blob to data URL for session storage
+      // Serialize in background for session persistence (not on render path)
       const reader = new FileReader()
       reader.onload = (e) => {
         const dataUrl = e.target?.result as string
-        const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
-        setImageState({ imageDataUrl: dataUrl, sites: newSites })
-        pushHistory({ imageDataUrl: dataUrl, sites: newSites, seed, numSites, inversePP })
+        setImageState(prev => ({ ...prev, imageDataUrl: dataUrl }))
         URL.revokeObjectURL(url)
       }
       reader.readAsDataURL(blob)
@@ -2119,7 +2177,7 @@ export function ImageVoronoi() {
     image.onerror = () => {
       URL.revokeObjectURL(url)
     }
-  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, applyImageScale, stopAndResetAnimation])
+  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, displayScaleMap, applyImageScale, stopAndResetAnimation, getScaleOptions])
 
 
   const toggleWebGL = useCallback(() => {
@@ -2147,8 +2205,8 @@ export function ImageVoronoi() {
   })
 
   useAction('voronoi:scale-up', {
-    label: 'Increase image scale',
-    group: 'Voronoi',
+    label: 'Increase compute scale',
+    group: 'Scale',
     defaultBindings: ['shift+ArrowUp'],
     handler: () => {
       if (scaleOptions.length < 2) return
@@ -2159,14 +2217,56 @@ export function ImageVoronoi() {
   })
 
   useAction('voronoi:scale-down', {
-    label: 'Decrease image scale',
-    group: 'Voronoi',
+    label: 'Decrease compute scale',
+    group: 'Scale',
     defaultBindings: ['shift+ArrowDown'],
     handler: () => {
       if (scaleOptions.length < 2) return
-      // Find first preset smaller than current scale (list is descending)
       const target = scaleOptions.find(o => o.scale < imageScale - 0.001)
       if (target) applyImageScale(target.scale)
+    },
+  })
+
+  useAction('voronoi:display-scale-up', {
+    label: 'Increase display scale',
+    group: 'Scale',
+    defaultBindings: ['alt+shift+ArrowUp'],
+    handler: () => {
+      if (displayScaleOptions.length < 2) return
+      const numericOpts = displayScaleOptions.filter(o => typeof o.value === 'number')
+      if (numericOpts.length === 0) return
+      if (displayScale === 'auto') {
+        // Switch to largest numeric option
+        setDisplayScale(numericOpts[0].value)
+        setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: numericOpts[0].value }))
+      } else {
+        const idx = numericOpts.findIndex(o => o.value === displayScale)
+        if (idx > 0) {
+          setDisplayScale(numericOpts[idx - 1].value)
+          setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: numericOpts[idx - 1].value }))
+        }
+      }
+    },
+  })
+
+  useAction('voronoi:display-scale-down', {
+    label: 'Decrease display scale',
+    group: 'Scale',
+    defaultBindings: ['alt+shift+ArrowDown'],
+    handler: () => {
+      if (displayScaleOptions.length < 2) return
+      const numericOpts = displayScaleOptions.filter(o => typeof o.value === 'number')
+      if (numericOpts.length === 0) return
+      if (displayScale === 'auto') return // Already at "smallest" (auto)
+      const idx = numericOpts.findIndex(o => o.value === displayScale)
+      if (idx < numericOpts.length - 1) {
+        setDisplayScale(numericOpts[idx + 1].value)
+        setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: numericOpts[idx + 1].value }))
+      } else {
+        // At smallest numeric, go back to auto
+        setDisplayScale('auto')
+        setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: 'auto' }))
+      }
     },
   })
 
@@ -2212,6 +2312,12 @@ export function ImageVoronoi() {
         <canvas
           className="canvas"
           ref={canvasRef}
+          style={displayScale !== 'auto' && originalDimensions ? {
+            width: Math.round(originalDimensions.width * (displayScale as number)),
+            height: Math.round(originalDimensions.height * (displayScale as number)),
+            maxWidth: 'none',
+            maxHeight: 'none',
+          } : undefined}
           onMouseMove={handleCanvasMouseMove}
           onMouseLeave={handleCanvasMouseLeave}
         />
@@ -2247,7 +2353,7 @@ export function ImageVoronoi() {
               <span className="image-pixels">{(imageDimensions.width * imageDimensions.height / 1e6).toFixed(2)}MP</span>
             </span>
             {scaleOptions.length > 1 && (
-              <Tooltip title="Image scale (Shift+↑/↓, #w, #h)" arrow>
+              <Tooltip title="Compute scale (Shift+↑/↓, #w, #h)" arrow>
                 <select
                   className="scale-select"
                   value={imageScale}
@@ -2263,6 +2369,24 @@ export function ImageVoronoi() {
                       {Math.round(imageScale * 100)}% ({imageDimensions.width}×{imageDimensions.height})
                     </option>
                   )}
+                </select>
+              </Tooltip>
+            )}
+            {displayScaleOptions.length > 1 && (
+              <Tooltip title="Display scale (Alt+Shift+↑/↓)" arrow>
+                <select
+                  className="scale-select"
+                  value={String(displayScale)}
+                  onChange={(e) => {
+                    const val = e.target.value === 'auto' ? 'auto' as const : parseFloat(e.target.value)
+                    setDisplayScale(val)
+                    setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: val }))
+                    e.target.blur()
+                  }}
+                >
+                  {displayScaleOptions.map(opt => (
+                    <option key={String(opt.value)} value={String(opt.value)}>{opt.label}</option>
+                  ))}
                 </select>
               </Tooltip>
             )}
