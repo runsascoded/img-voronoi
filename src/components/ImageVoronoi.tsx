@@ -276,6 +276,9 @@ export function ImageVoronoi() {
   const pixelRenderingRef = useRef(true)
   const webglRef2 = useRef(false)  // Track useWebGL for callbacks
 
+  // Gallery switch generation counter (guards stale async callbacks)
+  const galleryGenRef = useRef(0)
+
   // Undo/redo history
   const historyRef = useRef<HistoryEntry[]>([])
   const historyIndexRef = useRef(-1)
@@ -2130,6 +2133,7 @@ export function ImageVoronoi() {
   const handleSelectFromGallery = useCallback((blob: Blob, basename: string, id?: string) => {
     stopAndResetAnimation()
     if (id) setCurrentImageId(id)
+    const gen = ++galleryGenRef.current
 
     // Look up saved scales for this image
     const imageScaleKey = id ?? '_default'
@@ -2142,6 +2146,8 @@ export function ImageVoronoi() {
     const image = new Image()
     image.src = url
     image.onload = () => {
+      if (galleryGenRef.current !== gen) { URL.revokeObjectURL(url); return }
+
       // Store original full-resolution image
       originalImageRef.current = image
       setOriginalDimensions({ width: image.width, height: image.height })
@@ -2154,16 +2160,48 @@ export function ImageVoronoi() {
         effectiveScale = pickDefaultScale(image.width, image.height, opts, savedDisplayScale)
       }
 
-      if (effectiveScale !== 1) {
-        applyImageScale(effectiveScale, imageScaleKey)
-      } else {
-        setImageScale(1)
-        imgRef.current = image
-        setImageDimensions({ width: image.width, height: image.height })
-        const newSites = drawImg(image, true, numSites, inversePP, seed, undefined, pixelRenderingRef.current)
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      // Draw source image as preview at target dimensions
+      const nw = effectiveScale !== 1 ? Math.round(image.width * effectiveScale) : image.width
+      const nh = effectiveScale !== 1 ? Math.round(image.height * effectiveScale) : image.height
+      canvas.width = nw
+      canvas.height = nh
+      ctx.drawImage(image, 0, 0, nw, nh)
+      setImageDimensions({ width: nw, height: nh })
+      setImageScale(nw / image.width)
+
+      // Double-rAF: paint source image preview, then compute fresh Voronoi
+      // (Can't reuse applyImageScale here — it remaps old sites, but this is a new image)
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (galleryGenRef.current !== gen) return
+
+        // Redraw clean image (canvas may have been touched between frames)
+        ctx.drawImage(image, 0, 0, nw, nh)
+        originalImgDataRef.current = ctx.getImageData(0, 0, nw, nh)
+
+        setScaleMap(prev => ({ ...prev, [imageScaleKey]: nw / image.width }))
+
+        // Dispose old engines (recreated on next compute)
+        if (wasmRef.current) { wasmRef.current.dispose(); wasmRef.current = null }
+        if (webglRef.current) { webglRef.current.dispose(); webglRef.current = null }
+
+        // Fresh Voronoi with new sites (no remapping from previous image)
+        voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
+        const newSites = drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
+        setCurrentSiteCount(newSites.length)
+        setTargetSiteCount(numSites)
         setImageState({ imageDataUrl: null, sites: newSites })
         pushHistory({ imageDataUrl: null, sites: newSites, seed, numSites, inversePP })
-      }
+
+        // Update imgRef for future operations
+        const scaledImg = new Image()
+        scaledImg.src = canvas.toDataURL()
+        scaledImg.onload = () => { imgRef.current = scaledImg }
+      }))
 
       // Serialize in background for session persistence (not on render path)
       const reader = new FileReader()
@@ -2177,7 +2215,7 @@ export function ImageVoronoi() {
     image.onerror = () => {
       URL.revokeObjectURL(url)
     }
-  }, [drawImg, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, displayScaleMap, applyImageScale, stopAndResetAnimation, getScaleOptions])
+  }, [drawVoronoi, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, displayScaleMap, stopAndResetAnimation, getScaleOptions, setScaleMap])
 
 
   const toggleWebGL = useCallback(() => {
