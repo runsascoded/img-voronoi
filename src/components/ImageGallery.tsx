@@ -16,6 +16,7 @@ const COLLAPSED_KEY = 'voronoi-gallery-collapsed'
 
 interface ImageGalleryProps {
   onSelectImage: (blob: Blob, basename: string, id?: string) => void
+  onNeighborIds?: (prev: string | null, next: string | null) => void
   currentImageId?: string
   galleryVersion?: number
 }
@@ -24,7 +25,7 @@ interface ThumbnailCache {
   [id: string]: string
 }
 
-export function ImageGallery({ onSelectImage, currentImageId, galleryVersion }: ImageGalleryProps) {
+export function ImageGallery({ onSelectImage, onNeighborIds, currentImageId, galleryVersion }: ImageGalleryProps) {
   const [images, setImages] = useState<StoredImage[]>([])
   const [thumbnails, setThumbnails] = useState<ThumbnailCache>({})
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -138,6 +139,16 @@ export function ImageGallery({ onSelectImage, currentImageId, galleryVersion }: 
     const imgs = await getStoredImages()
     setImages(imgs)
   }, [])
+
+  // Report prev/next neighbor IDs to parent
+  useEffect(() => {
+    if (!onNeighborIds || images.length === 0) return
+    const idx = images.findIndex(img => img.id === currentImageId)
+    if (idx < 0) { onNeighborIds(null, null); return }
+    const prev = idx === 0 ? images[images.length - 1].id : images[idx - 1].id
+    const next = idx === images.length - 1 ? images[0].id : images[idx + 1].id
+    onNeighborIds(prev, next)
+  }, [images, currentImageId, onNeighborIds])
 
   // Register gallery toggle shortcut
   useAction('gallery:toggle', {

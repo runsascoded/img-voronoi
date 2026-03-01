@@ -200,6 +200,46 @@ function applyEdgeOverlay(
   }
 }
 
+type CacheKey = string  // `${imageId}:${seed}:${numSites}:${inversePP}:${scale}`
+
+interface CacheEntry {
+  renderedPixels: ImageData
+  originalImgData: ImageData
+  sites: Position[]
+  cellOf: Int32Array | null
+  cellColors: RGB[] | null
+  cellAreas: Uint32Array | null
+  imgDataUrl: string
+}
+
+class VoronoiCache {
+  private map = new Map<CacheKey, CacheEntry>()
+  constructor(private maxSize: number = 8) {}
+
+  key(imageId: string, seed: number, numSites: number, inversePP: boolean, scale: number): CacheKey {
+    return `${imageId}:${seed}:${numSites}:${inversePP ? 1 : 0}:${scale.toFixed(6)}`
+  }
+
+  get(k: CacheKey): CacheEntry | undefined {
+    const entry = this.map.get(k)
+    if (entry) {
+      this.map.delete(k)
+      this.map.set(k, entry)
+    }
+    return entry
+  }
+
+  set(k: CacheKey, entry: CacheEntry) {
+    this.map.delete(k)
+    if (this.map.size >= this.maxSize) {
+      this.map.delete(this.map.keys().next().value!)
+    }
+    this.map.set(k, entry)
+  }
+}
+
+const voronoiCache = new VoronoiCache(8)
+
 export function ImageVoronoi() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const webglCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -278,6 +318,10 @@ export function ImageVoronoi() {
 
   // Gallery switch generation counter (guards stale async callbacks)
   const galleryGenRef = useRef(0)
+
+  // Neighbor image IDs for speculative pre-compute
+  const neighborIdsRef = useRef<{ prev: string | null; next: string | null }>({ prev: null, next: null })
+  const precomputeIdleRef = useRef<number>(0)
 
   // Undo/redo history
   const historyRef = useRef<HistoryEntry[]>([])
@@ -2129,6 +2173,72 @@ export function ImageVoronoi() {
     handler: (_e: unknown, captures?: number[]) => { captures && applyScaleByDim(captures[0], 'h') },
   })
 
+  // Track neighbor image IDs from gallery
+  const handleNeighborIds = useCallback((prev: string | null, next: string | null) => {
+    neighborIdsRef.current = { prev, next }
+  }, [])
+
+  // Speculative pre-compute of neighboring gallery images
+  const scheduleNeighborPrecompute = useCallback(() => {
+    if (precomputeIdleRef.current) cancelIdleCallback(precomputeIdleRef.current)
+
+    precomputeIdleRef.current = requestIdleCallback(() => {
+      const { prev, next } = neighborIdsRef.current
+      const neighbors = [prev, next].filter((id): id is string => id !== null)
+
+      for (const neighborId of neighbors) {
+        const neighborScale = scaleMap[neighborId] ?? undefined // will compute default below
+        // We can't compute a default scale without the image dimensions,
+        // so if no stored scale, we'll resolve it after loading the image.
+
+        const precompute = (img: HTMLImageElement, scale: number) => {
+          const nw = Math.round(img.width * scale)
+          const nh = Math.round(img.height * scale)
+          const actualScale = nw / img.width
+          const k = voronoiCache.key(neighborId, seed, numSites, inversePP, actualScale)
+          if (voronoiCache.get(k)) return // Already cached
+
+          const temp = document.createElement('canvas')
+          temp.width = nw; temp.height = nh
+          const tctx = temp.getContext('2d')!
+          tctx.drawImage(img, 0, 0, nw, nh)
+          const origData = tctx.getImageData(0, 0, nw, nh)
+
+          const drawer = new VoronoiDrawer(temp, numSites, inversePP)
+          const result = drawer.fillVoronoiPixels(undefined, seed)
+
+          const renderedPixels = tctx.getImageData(0, 0, nw, nh)
+          voronoiCache.set(k, {
+            renderedPixels,
+            originalImgData: origData,
+            sites: drawer.getSites(),
+            cellOf: result?.cellOf ?? null,
+            cellColors: result?.cellColors ?? null,
+            cellAreas: null,
+            imgDataUrl: temp.toDataURL(),
+          })
+        }
+
+        getImageBlob(neighborId).then(blob => {
+          if (!blob) return
+          const url = URL.createObjectURL(blob)
+          const img = new Image()
+          img.src = url
+          img.onload = () => {
+            let scale = neighborScale
+            if (scale === undefined) {
+              const opts = getScaleOptions(img.width, img.height)
+              const neighborDisplayScale = displayScaleMap[neighborId] ?? 'auto'
+              scale = pickDefaultScale(img.width, img.height, opts, neighborDisplayScale)
+            }
+            precompute(img, scale)
+            URL.revokeObjectURL(url)
+          }
+        })
+      }
+    }, { timeout: 500 })
+  }, [scaleMap, displayScaleMap, seed, numSites, inversePP, getScaleOptions])
+
   // Handle selecting an image from the gallery
   const handleSelectFromGallery = useCallback((blob: Blob, basename: string, id?: string) => {
     stopAndResetAnimation()
@@ -2165,31 +2275,67 @@ export function ImageVoronoi() {
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
-      // Draw source image as preview at target dimensions
       const nw = effectiveScale !== 1 ? Math.round(image.width * effectiveScale) : image.width
       const nh = effectiveScale !== 1 ? Math.round(image.height * effectiveScale) : image.height
-      canvas.width = nw
-      canvas.height = nh
-      ctx.drawImage(image, 0, 0, nw, nh)
-      setImageDimensions({ width: nw, height: nh })
-      setImageScale(nw / image.width)
+      const actualScale = nw / image.width
 
-      // Double-rAF: paint source image preview, then compute fresh Voronoi
-      // (Can't reuse applyImageScale here — it remaps old sites, but this is a new image)
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        if (galleryGenRef.current !== gen) return
+      // Check render cache
+      const cacheKey = voronoiCache.key(imageScaleKey, seed, numSites, inversePP, actualScale)
+      const cached = voronoiCache.get(cacheKey)
 
-        // Redraw clean image (canvas may have been touched between frames)
+      if (cached) {
+        // Cache hit — instant blit, no Voronoi compute
+        canvas.width = nw; canvas.height = nh
+
+        // Dispose old engines
+        if (wasmRef.current) { wasmRef.current.dispose(); wasmRef.current = null }
+        if (webglRef.current) { webglRef.current.dispose(); webglRef.current = null }
+
+        // Draw original image so VoronoiDrawer gets correct Sobel data
         ctx.drawImage(image, 0, 0, nw, nh)
         originalImgDataRef.current = ctx.getImageData(0, 0, nw, nh)
+        voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
 
-        setScaleMap(prev => ({ ...prev, [imageScaleKey]: nw / image.width }))
+        // Reconstruct Voronoi from cached cell data (~2ms vs ~200ms full compute)
+        cellOfRef.current = cached.cellOf
+        cellColorsRef.current = cached.cellColors
+        cellAreasRef.current = cached.cellAreas
+        if (cached.cellOf && cached.cellColors) {
+          voronoiRef.current.drawFromCellData(cached.cellOf, cached.cellColors, cached.sites)
+        } else {
+          ctx.putImageData(cached.renderedPixels, 0, 0)
+        }
+        applyDisplayOverlays()
+
+        setScaleMap(prev => ({ ...prev, [imageScaleKey]: actualScale }))
+        setImageDimensions({ width: nw, height: nh })
+        setImageScale(actualScale)
+
+        // Restore imgRef asynchronously
+        const scaledImg = new Image()
+        scaledImg.src = cached.imgDataUrl
+        scaledImg.onload = () => { imgRef.current = scaledImg }
+
+        setCurrentSiteCount(cached.sites.length)
+        setTargetSiteCount(numSites)
+        setImageState({ imageDataUrl: null, sites: cached.sites })
+        pushHistory({ imageDataUrl: null, sites: cached.sites, seed, numSites, inversePP })
+        scheduleNeighborPrecompute()
+      } else {
+        // Cache miss — compute synchronously (no double-rAF)
+        canvas.width = nw
+        canvas.height = nh
+        ctx.drawImage(image, 0, 0, nw, nh)
+        originalImgDataRef.current = ctx.getImageData(0, 0, nw, nh)
+        setImageDimensions({ width: nw, height: nh })
+        setImageScale(actualScale)
+        setScaleMap(prev => ({ ...prev, [imageScaleKey]: actualScale }))
 
         // Dispose old engines (recreated on next compute)
         if (wasmRef.current) { wasmRef.current.dispose(); wasmRef.current = null }
         if (webglRef.current) { webglRef.current.dispose(); webglRef.current = null }
 
-        // Fresh Voronoi with new sites (no remapping from previous image)
+        // Fresh Voronoi with new sites
         voronoiRef.current = new VoronoiDrawer(canvas, numSites, inversePP)
         const newSites = drawVoronoi(voronoiRef.current, seed, undefined, pixelRenderingRef.current)
         setCurrentSiteCount(newSites.length)
@@ -2197,11 +2343,26 @@ export function ImageVoronoi() {
         setImageState({ imageDataUrl: null, sites: newSites })
         pushHistory({ imageDataUrl: null, sites: newSites, seed, numSites, inversePP })
 
+        // Populate cache with this compute result
+        const renderedPixels = ctx.getImageData(0, 0, nw, nh)
+        const imgDataUrl = canvas.toDataURL()
+        voronoiCache.set(cacheKey, {
+          renderedPixels,
+          originalImgData: originalImgDataRef.current!,
+          sites: newSites,
+          cellOf: cellOfRef.current,
+          cellColors: cellColorsRef.current,
+          cellAreas: cellAreasRef.current,
+          imgDataUrl,
+        })
+
         // Update imgRef for future operations
         const scaledImg = new Image()
-        scaledImg.src = canvas.toDataURL()
+        scaledImg.src = imgDataUrl
         scaledImg.onload = () => { imgRef.current = scaledImg }
-      }))
+
+        scheduleNeighborPrecompute()
+      }
 
       // Serialize in background for session persistence (not on render path)
       const reader = new FileReader()
@@ -2215,7 +2376,7 @@ export function ImageVoronoi() {
     image.onerror = () => {
       URL.revokeObjectURL(url)
     }
-  }, [drawVoronoi, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, displayScaleMap, stopAndResetAnimation, getScaleOptions, setScaleMap])
+  }, [drawVoronoi, numSites, inversePP, seed, setImageState, pushHistory, scaleMap, displayScaleMap, stopAndResetAnimation, getScaleOptions, setScaleMap, applyDisplayOverlays, scheduleNeighborPrecompute])
 
 
   const toggleWebGL = useCallback(() => {
@@ -2337,6 +2498,7 @@ export function ImageVoronoi() {
     <>
       <ImageGallery
         onSelectImage={handleSelectFromGallery}
+        onNeighborIds={handleNeighborIds}
         currentImageId={currentImageId}
         galleryVersion={galleryVersion}
       />
