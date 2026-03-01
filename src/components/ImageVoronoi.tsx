@@ -3,11 +3,11 @@ import useSessionStorageState from 'use-session-storage-state'
 import { useUrlStates, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
 import { useAction, useActions } from 'use-kbd'
 import { saveAs } from 'file-saver'
-import Tooltip from '@mui/material/Tooltip'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
 import { VoronoiWebGL } from '../voronoi/VoronoiWebGL'
 import { initWasm, VoronoiWasm } from '../voronoi/VoronoiWasm'
 import { ImageGallery, storeImage } from './ImageGallery'
+import { ControlPanel } from './ControlPanel'
 import { isOPFSSupported, getStoredImages, getImageBlob, storeImageFromUrl, updateImageBasename } from '../storage/ImageStorage'
 import sampleImage from '../assets/sample.jpg'
 import sampleImage2 from '../assets/sample2.jpg'
@@ -291,6 +291,7 @@ export function ImageVoronoi() {
   // Image metadata
   const [imageFilename, setImageFilename] = useState<string | null>(null)
   const [downloadFormat, setDownloadFormat] = useState<'png' | 'jpeg'>('png')
+  const [controlsCollapsed, setControlsCollapsed] = useState(() => localStorage.getItem('voronoi-panel-collapsed') === '1')
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null)
   const [currentImageId, setCurrentImageId] = useSessionStorageState<string | undefined>('voronoi-image-id', {
     defaultValue: undefined,
@@ -1966,7 +1967,22 @@ export function ImageVoronoi() {
     }
   }, [])
 
+  const toggleControlsCollapsed = useCallback(() => {
+    setControlsCollapsed(prev => {
+      const next = !prev
+      localStorage.setItem('voronoi-panel-collapsed', next ? '1' : '0')
+      return next
+    })
+  }, [])
+
   // Keyboard shortcuts
+  useAction('voronoi:toggle-controls', {
+    label: 'Toggle controls panel',
+    group: 'Voronoi',
+    defaultBindings: ['c'],
+    handler: toggleControlsCollapsed,
+  })
+
   useAction('voronoi:undo', {
     label: 'Undo',
     group: 'Voronoi',
@@ -2469,31 +2485,6 @@ export function ImageVoronoi() {
     },
   })
 
-  // SVG icons
-  const PlayIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-  )
-  const PauseIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-  )
-  const DownloadIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/></svg>
-  )
-  const UploadIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M5 4h14v2H5V4zm0 10h4v6h6v-6h4l-7-7-7 7z"/></svg>
-  )
-  const StepBackIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
-  )
-  const StepForwardIcon = () => (
-    <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-  )
-
-  // Format sites display: show "current→target" when growing, otherwise just the number
-  const sitesDisplay = currentSiteCount !== targetSiteCount
-    ? <><span className="sites-current">{currentSiteCount}</span><span className="sites-arrow">→</span><span className="sites-target">{targetSiteCount}</span></>
-    : <span>{numSites}</span>
-
   return (
     <>
       <ImageGallery
@@ -2527,338 +2518,73 @@ export function ImageVoronoi() {
           style={{ display: 'none' }}
         />
       </div>
-
-      <div className="controls-wrapper">
-        {/* Image metadata */}
-        {imageDimensions && (
-          <div className="control-group image-info">
-            <span className="image-meta">
-              <input
-                ref={filenameInputRef}
-                className="image-filename-input"
-                type="text"
-                value={imageFilename ?? 'voronoi'}
-                onChange={(e) => setImageFilename(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                onBlur={async (e) => {
-                  const name = e.target.value.trim()
-                  if (name && currentImageId) {
-                    await updateImageBasename(currentImageId, name)
-                    setGalleryVersion(v => v + 1)
-                  }
-                }}
-                title="Image name (used for downloads)"
-              />
-              <span className="image-dims">{imageDimensions.width}×{imageDimensions.height}</span>
-              <span className="image-pixels">{(imageDimensions.width * imageDimensions.height / 1e6).toFixed(2)}MP</span>
-            </span>
-            {scaleOptions.length > 1 && (
-              <Tooltip title="Compute scale (Shift+↑/↓, #w, #h)" arrow>
-                <select
-                  className="scale-select"
-                  value={imageScale}
-                  onChange={(e) => { applyImageScale(parseFloat(e.target.value)); e.target.blur() }}
-                >
-                  {scaleOptions.map(opt => (
-                    <option key={opt.scale} value={opt.scale}>
-                      {opt.label} ({opt.dims})
-                    </option>
-                  ))}
-                  {!scaleOptions.some(o => Math.abs(o.scale - imageScale) < 0.001) && imageDimensions && (
-                    <option value={imageScale}>
-                      {Math.round(imageScale * 100)}% ({imageDimensions.width}×{imageDimensions.height})
-                    </option>
-                  )}
-                </select>
-              </Tooltip>
-            )}
-            {displayScaleOptions.length > 1 && (
-              <Tooltip title="Display scale (Alt+Shift+↑/↓)" arrow>
-                <select
-                  className="scale-select"
-                  value={String(displayScale)}
-                  onChange={(e) => {
-                    const val = e.target.value === 'auto' ? 'auto' as const : parseFloat(e.target.value)
-                    setDisplayScale(val)
-                    setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: val }))
-                    e.target.blur()
-                  }}
-                >
-                  {displayScaleOptions.map(opt => (
-                    <option key={String(opt.value)} value={String(opt.value)}>{opt.label}</option>
-                  ))}
-                </select>
-              </Tooltip>
-            )}
-          </div>
-        )}
-
-        {/* Playback controls */}
-        <div className="control-group">
-          <Tooltip title="Step backward (<)" arrow>
-            <button className="icon-button" onClick={stepBackward}>
-              <StepBackIcon />
-            </button>
-          </Tooltip>
-          <Tooltip title={isPlaying ? 'Pause (Space)' : 'Play (Space)'} arrow>
-            <button className="icon-button" onClick={togglePlay}>
-              {isPlaying ? <PauseIcon /> : <PlayIcon />}
-            </button>
-          </Tooltip>
-          <Tooltip title="Step forward (>)" arrow>
-            <button className="icon-button" onClick={stepForward}>
-              <StepForwardIcon />
-            </button>
-          </Tooltip>
-          {isPlaying && <span className="fps-display">{fps} fps</span>}
-        </div>
-
-        {/* Sites slider */}
-        <Tooltip title="Number of Voronoi sites" arrow>
-          <div className="control-group slider-group">
-            <label className="control-label">Sites</label>
-            <input
-              className="control-slider"
-              type="range"
-              value={numSites}
-              min={SITES_MIN}
-              max={SITES_MAX}
-              step="25"
-              onChange={handleNumSitesChange}
-            />
-            <span className="control-number sites-display">{sitesDisplay}</span>
-          </div>
-        </Tooltip>
-
-        {/* Speed slider */}
-        <Tooltip title="Animation speed (pixels/sec)" arrow>
-          <div className="control-group slider-group">
-            <label className="control-label">Speed</label>
-            <input
-              className="control-slider"
-              type="range"
-              value={speed}
-              min="1"
-              max="60"
-              step="1"
-              onChange={(e) => setValues({ v: parseInt(e.target.value, 10) })}
-            />
-            <span className="control-number">{speed}</span>
-          </div>
-        </Tooltip>
-
-        {/* 2× Time slider */}
-        <Tooltip title="Doubling time for gradual site changes (0 = instant)" arrow>
-          <div className="control-group slider-group">
-            <label className="control-label">2× Time</label>
-            <input
-              className="control-slider"
-              type="range"
-              value={doublingTime}
-              min="0"
-              max="10"
-              step="0.5"
-              onChange={(e) => setValues({ d: parseFloat(e.target.value) })}
-            />
-            <span className="control-number">{doublingTime > 0 ? `${doublingTime}s` : 'off'}</span>
-          </div>
-        </Tooltip>
-
-        {/* Centroid pull slider (visible when WASM is enabled) */}
-        {useWasm && wasmReady && (
-          <Tooltip title="Centroid pull — Lloyd's relaxation strength (0 = off)" arrow>
-            <div className="control-group slider-group">
-              <label className="control-label">Pull</label>
-              <input
-                className="control-slider"
-                type="range"
-                value={centroidPull}
-                min="0"
-                max="20"
-                step="0.5"
-                onChange={(e) => setValues({ cp: parseFloat(e.target.value) })}
-              />
-              <span className="control-number">{centroidPull > 0 ? centroidPull : 'off'}</span>
-            </div>
-          </Tooltip>
-        )}
-
-        {/* O-U steering sliders (visible when WASM is enabled) */}
-        {useWasm && wasmReady && (
-          <Tooltip title="Mean reversion — higher = straighter paths (O-U θ)" arrow>
-            <div className="control-group slider-group">
-              <label className="control-label">Drift</label>
-              <input
-                className="control-slider"
-                type="range"
-                value={theta}
-                min="0"
-                max="10"
-                step="0.5"
-                onChange={(e) => setValues({ th: parseFloat(e.target.value) })}
-              />
-              <span className="control-number">{theta > 0 ? theta : 'off'}</span>
-            </div>
-          </Tooltip>
-        )}
-        {useWasm && wasmReady && (
-          <Tooltip title="Random steering — higher = more erratic turns (O-U σ)" arrow>
-            <div className="control-group slider-group">
-              <label className="control-label">Wander</label>
-              <input
-                className="control-slider"
-                type="range"
-                value={sigma}
-                min="0"
-                max="10"
-                step="0.5"
-                onChange={(e) => setValues({ si: parseFloat(e.target.value) })}
-              />
-              <span className="control-number">{sigma > 0 ? sigma : 'off'}</span>
-            </div>
-          </Tooltip>
-        )}
-
-        {/* Seed input */}
-        <Tooltip title="Random seed for site placement (F to focus)" arrow>
-          <div className="control-group">
-            <label className="control-label">Seed</label>
-            <input
-              ref={seedInputRef}
-              className="seed-input"
-              type="number"
-              min="0"
-              value={seed}
-              onChange={handleSeedChange}
-            />
-          </div>
-        </Tooltip>
-
-        {/* Checkboxes */}
-        <Tooltip title="Bias initial site placement toward edges" arrow>
-          <label className="selection-label">
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={inversePP}
-              onChange={handleInversePPChange}
-            />
-            {' '}Edge bias
-          </label>
-        </Tooltip>
-
-        <Tooltip title={webglSupported ? 'WebGL acceleration (G)' : 'WebGL not supported'} arrow>
-          <label
-            className="selection-label"
-            style={webglSupported ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
-          >
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={useWebGL && webglSupported}
-              onChange={toggleWebGL}
-              disabled={!webglSupported}
-            />
-            {' '}WebGL
-          </label>
-        </Tooltip>
-
-        <Tooltip title={wasmReady ? 'WASM backend — Rust compute + O-U physics (W)' : 'WASM loading...'} arrow>
-          <label
-            className="selection-label"
-            style={wasmReady ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
-          >
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={useWasm && wasmReady}
-              onChange={() => setValues({ w: !useWasm })}
-              disabled={!wasmReady}
-            />
-            {' '}WASM
-          </label>
-        </Tooltip>
-
-        <Tooltip title="Show Voronoi cell colors (R)" arrow>
-          <label className="selection-label">
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={showRegions}
-              onChange={() => setShowRegions(!showRegions)}
-            />
-            {' '}Regions
-          </label>
-        </Tooltip>
-
-        <Tooltip title="Overlay cell boundary lines (E)" arrow>
-          <label className="selection-label">
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={showEdges}
-              onChange={() => setShowEdges(!showEdges)}
-            />
-            {' '}Edges
-          </label>
-        </Tooltip>
-
-        <Tooltip title="Show site markers (P)" arrow>
-          <label className="selection-label">
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={showSites}
-              onChange={() => setShowSites(!showSites)}
-            />
-            {' '}Sites
-          </label>
-        </Tooltip>
-
-        <Tooltip title="Show velocity vectors (V)" arrow>
-          <label className="selection-label">
-            <input
-              className="checkbox"
-              type="checkbox"
-              checked={showVectors}
-              onChange={() => setShowVectors(!showVectors)}
-            />
-            {' '}Vectors
-          </label>
-        </Tooltip>
-
-        {/* Upload and Download */}
-        <div className="control-group">
-          <Tooltip title="Upload image" arrow>
-            <label className="icon-button">
-              <UploadIcon />
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleFileChange}
-                className="file-input"
-              />
-            </label>
-          </Tooltip>
-          <Tooltip title="Download format" arrow>
-            <select
-              className="format-select"
-              value={downloadFormat}
-              onChange={(e) => { setDownloadFormat(e.target.value as 'png' | 'jpeg'); e.target.blur() }}
-            >
-              <option value="png">PNG</option>
-              <option value="jpeg">JPG</option>
-            </select>
-          </Tooltip>
-          <Tooltip title="Download image (S)" arrow>
-            <button className="icon-button" onClick={handleDownload}>
-              <DownloadIcon />
-            </button>
-          </Tooltip>
-        </div>
-      </div>
     </div>
+      <ControlPanel
+        collapsed={controlsCollapsed}
+        onToggleCollapse={toggleControlsCollapsed}
+        isPlaying={isPlaying}
+        fps={fps}
+        speed={speed}
+        doublingTime={doublingTime}
+        onTogglePlay={togglePlay}
+        onStepBackward={stepBackward}
+        onStepForward={stepForward}
+        onSpeedChange={(v) => setValues({ v })}
+        onDoublingTimeChange={(d) => setValues({ d })}
+        numSites={numSites}
+        seed={seed}
+        inversePP={inversePP}
+        currentSiteCount={currentSiteCount}
+        targetSiteCount={targetSiteCount}
+        onNumSitesChange={handleNumSitesChange}
+        onSeedChange={handleSeedChange}
+        onInversePPChange={handleInversePPChange}
+        seedInputRef={seedInputRef}
+        useWasm={useWasm}
+        wasmReady={wasmReady}
+        centroidPull={centroidPull}
+        theta={theta}
+        sigma={sigma}
+        onCentroidPullChange={(cp) => setValues({ cp })}
+        onThetaChange={(th) => setValues({ th })}
+        onSigmaChange={(si) => setValues({ si })}
+        showRegions={showRegions}
+        showEdges={showEdges}
+        showSites={showSites}
+        showVectors={showVectors}
+        onToggleRegions={() => setShowRegions(!showRegions)}
+        onToggleEdges={() => setShowEdges(!showEdges)}
+        onToggleSites={() => setShowSites(!showSites)}
+        onToggleVectors={() => setShowVectors(!showVectors)}
+        imageDimensions={imageDimensions}
+        imageFilename={imageFilename}
+        imageScale={imageScale}
+        displayScale={displayScale}
+        scaleOptions={scaleOptions}
+        displayScaleOptions={displayScaleOptions}
+        filenameInputRef={filenameInputRef}
+        onFilenameChange={setImageFilename}
+        onFilenameBlur={async (name) => {
+          if (name && currentImageId) {
+            await updateImageBasename(currentImageId, name)
+            setGalleryVersion(v => v + 1)
+          }
+        }}
+        onApplyImageScale={applyImageScale}
+        onDisplayScaleChange={(val) => {
+          setDisplayScale(val)
+          setDisplayScaleMap(prev => ({ ...prev, [scaleKey]: val }))
+        }}
+        useWebGL={useWebGL}
+        webglSupported={webglSupported}
+        onToggleWebGL={toggleWebGL}
+        onToggleWasm={() => setValues({ w: !useWasm })}
+        downloadFormat={downloadFormat}
+        fileInputRef={fileInputRef}
+        onDownloadFormatChange={setDownloadFormat}
+        onFileChange={handleFileChange}
+        onDownload={handleDownload}
+      />
     </>
   )
 }

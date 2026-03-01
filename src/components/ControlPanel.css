@@ -1,0 +1,425 @@
+/* ── Control panel container ─────────────────────────────── */
+.control-panel {
+  position: fixed;
+  background: var(--gallery-bg);
+  z-index: 40;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.2s ease, max-height 0.2s ease;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Collapse toggle ────────────────────────────────────── */
+.cp-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: background-color 0.15s, color 0.15s;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.cp-toggle:hover {
+  background: var(--accent-tint);
+  color: var(--accent-hover);
+}
+
+.cp-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cp-collapsed .cp-header {
+  padding: 8px 4px;
+  justify-content: center;
+}
+
+.cp-title {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cp-sections {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ── Sections (details/summary) ─────────────────────────── */
+.cp-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.cp-section > summary {
+  list-style: none;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cp-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cp-section > summary::after {
+  content: '\203A'; /* › */
+  font-size: 14px;
+  transition: transform 0.15s ease;
+  display: inline-block;
+}
+
+.cp-section[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.cp-section > summary:hover {
+  color: var(--text);
+  background: var(--accent-tint);
+}
+
+/* ── Section body ───────────────────────────────────────── */
+.cp-body {
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ── Slider groups (full-width in panel) ────────────────── */
+.cp-body .slider-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cp-body .slider-group .control-label {
+  float: none;
+  margin: 0;
+  min-width: 42px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.cp-body .slider-group .control-slider {
+  float: none;
+  margin: 0;
+  flex: 1;
+  width: auto;
+  height: 1px;
+  background: var(--slider-bg);
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  border: 0;
+}
+
+.cp-body .slider-group .control-number {
+  float: none;
+  min-width: 32px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--text);
+  font-family: sans-serif;
+  background-color: transparent;
+  border: 0;
+  display: block;
+}
+
+.cp-body .slider-group .sites-display {
+  min-width: 48px;
+}
+
+/* ── Checkbox groups (vertical stack) ───────────────────── */
+.cp-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cp-checks .selection-label {
+  float: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  max-width: none;
+}
+
+.cp-checks .checkbox {
+  cursor: pointer;
+}
+
+/* ── Control groups ─────────────────────────────────────── */
+.cp-body .control-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cp-body .control-group .control-label {
+  float: none;
+  margin: 0;
+}
+
+/* ── Playback row ───────────────────────────────────────── */
+.cp-playback {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.cp-body .icon-button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  border-radius: 4px;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.cp-body .icon-button:hover {
+  background-color: var(--accent-tint);
+  color: var(--accent-hover);
+}
+
+.cp-body .icon-button svg {
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+.cp-body .fps-display {
+  font-family: monospace;
+  color: var(--accent);
+  font-size: 12px;
+  min-width: 50px;
+}
+
+/* ── Seed input ─────────────────────────────────────────── */
+.cp-body .seed-input {
+  width: 60px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-family: monospace;
+  font-size: 11px;
+  padding: 2px 4px;
+  margin-top: 2px;
+}
+
+.cp-body .seed-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Image info ─────────────────────────────────────────── */
+.cp-body .image-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.2;
+}
+
+.cp-body .image-filename-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 1px 4px;
+  max-width: 100%;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-body .image-filename-input:hover {
+  border-color: var(--border);
+}
+
+.cp-body .image-filename-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+}
+
+.cp-body .image-dims {
+  font-family: monospace;
+  font-size: 10px;
+}
+
+.cp-body .image-pixels {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.cp-body .scale-select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-size: 10px;
+  padding: 2px 4px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.cp-body .scale-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Format select ──────────────────────────────────────── */
+.cp-body .format-select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.cp-body .format-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── File input ─────────────────────────────────────────── */
+.cp-body .file-input {
+  display: none;
+}
+
+/* ── I/O row ────────────────────────────────────────────── */
+.cp-io-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Sites display with arrow ───────────────────────────── */
+.cp-body .sites-display {
+  white-space: nowrap;
+}
+
+.cp-body .sites-current {
+  color: var(--accent);
+}
+
+.cp-body .sites-arrow {
+  color: var(--muted);
+  margin: 0 2px;
+}
+
+.cp-body .sites-target {
+  color: var(--text);
+}
+
+/* ── Scrollbar ──────────────────────────────────────────── */
+.cp-sections::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cp-sections::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.cp-sections::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.cp-sections::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* ── Wide viewport: right sidebar ───────────────────────── */
+@media (min-width: 1001px) {
+  .control-panel {
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 240px;
+  }
+
+  .control-panel.cp-collapsed {
+    width: 28px;
+  }
+
+  .control-panel.cp-collapsed .cp-sections {
+    display: none;
+  }
+
+  body:has(.control-panel:not(.cp-collapsed)) .IV {
+    margin-right: 240px;
+    transition: margin-right 0.2s ease;
+  }
+
+  body:has(.control-panel.cp-collapsed) .IV {
+    margin-right: 28px;
+    transition: margin-right 0.2s ease;
+  }
+}
+
+/* ── Narrow viewport: bottom bar ────────────────────────── */
+@media (max-width: 1000px) {
+  .control-panel {
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-height: 50vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  .control-panel.cp-collapsed {
+    max-height: 36px;
+    overflow: hidden;
+  }
+
+  .control-panel.cp-collapsed .cp-sections {
+    display: none;
+  }
+
+  body:has(.image-gallery:not(.collapsed)) .control-panel {
+    left: 120px;
+  }
+
+  body:has(.image-gallery.collapsed) .control-panel {
+    left: 28px;
+  }
+
+  @media (max-width: 600px) {
+    body:has(.image-gallery:not(.collapsed)) .control-panel {
+      left: 100px;
+    }
+  }
+}
