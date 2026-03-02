@@ -1309,26 +1309,59 @@ export function ImageVoronoi() {
   const drawSitesOverlay = useCallback((ctx: CanvasRenderingContext2D, sites: Position[], velocities?: Position[]) => {
     // Draw velocity vectors (behind dots)
     if (showVectorsRef.current && velocities && velocities.length === sites.length) {
-      const velocityScale = 20
-      const arrowWing = 4  // arrowhead wing length
-      const arrowAngle = Math.PI / 6  // ±30° from shaft
+      const { width, height } = ctx.canvas
       const colors = cellColorsRef.current
-      ctx.lineWidth = 1.5
+
+      // Dim regions so arrows read as foreground
+      ctx.save()
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+      ctx.fillRect(0, 0, width, height)
+      ctx.restore()
+
+      const velocityScale = 20
+      const arrowWing = 5
+      const arrowAngle = Math.PI / 6  // ±30° from shaft
+      ctx.lineWidth = 2
       for (let i = 0; i < sites.length; i++) {
         const site = sites[i]
         const vel = velocities[i]
         const tipX = site.x + vel.x * velocityScale
         const tipY = site.y + vel.y * velocityScale
 
-        // Contrast-aware color: white on dark cells, black on light
-        let strokeColor = 'rgba(255, 255, 255, 0.8)'
+        // Arrow color: cell's hue at max brightness (pops against dimmed bg)
+        let color = 'rgb(255, 255, 255)'
         if (colors && colors[i]) {
           const [r, g, b] = colors[i]
-          const lum = 0.299 * r + 0.587 * g + 0.114 * b
-          strokeColor = lum < 128 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(0, 0, 0, 0.8)'
+          // RGB → HSL, clamp L to ≥0.75, convert back
+          const rn = r / 255, gn = g / 255, bn = b / 255
+          const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn)
+          const d = max - min
+          let h = 0
+          if (d > 0) {
+            if (max === rn) h = ((gn - bn) / d + 6) % 6
+            else if (max === gn) h = (bn - rn) / d + 2
+            else h = (rn - gn) / d + 4
+            h /= 6
+          }
+          const s = d === 0 ? 0 : d / (1 - Math.abs(max + min - 1))
+          const l = Math.max((max + min) / 2, 0.75)
+          // HSL → RGB
+          const c = (1 - Math.abs(2 * l - 1)) * s
+          const x = c * (1 - Math.abs((h * 6) % 2 - 1))
+          const m = l - c / 2
+          let r1: number, g1: number, b1: number
+          const sector = h * 6
+          if (sector < 1) { r1 = c; g1 = x; b1 = 0 }
+          else if (sector < 2) { r1 = x; g1 = c; b1 = 0 }
+          else if (sector < 3) { r1 = 0; g1 = c; b1 = x }
+          else if (sector < 4) { r1 = 0; g1 = x; b1 = c }
+          else if (sector < 5) { r1 = x; g1 = 0; b1 = c }
+          else { r1 = c; g1 = 0; b1 = x }
+          color = `rgb(${Math.round((r1 + m) * 255)}, ${Math.round((g1 + m) * 255)}, ${Math.round((b1 + m) * 255)})`
         }
-        ctx.strokeStyle = strokeColor
-        ctx.fillStyle = strokeColor
+        ctx.strokeStyle = color
+        ctx.fillStyle = color
 
         // Draw shaft
         ctx.beginPath()
