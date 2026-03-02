@@ -1303,7 +1303,7 @@ export function ImageVoronoi() {
     // Initialize history with current state
     animationHistoryRef.current = [currentSites.map(s => ({ ...s }))]
     historyPositionRef.current = 0
-  }, [numSites])
+  }, [numSites, ensureWasm])
 
   // Draw site markers and optional velocity vectors on the canvas
   const drawSitesOverlay = useCallback((ctx: CanvasRenderingContext2D, sites: Position[], velocities?: Position[]) => {
@@ -1499,6 +1499,15 @@ export function ImageVoronoi() {
       ? (now - lastFrameTimeRef.current) / 1000  // Convert to seconds
       : 1 / 60  // Default to ~60fps for first frame
     lastFrameTimeRef.current = now
+
+    // Lazy WASM init: if WASM is enabled but engine wasn't created yet
+    // (e.g., Play was pressed before WASM module loaded), try to create it now
+    if (wasmEnabledRef.current && !wasmRef.current) {
+      const wasm = ensureWasm(canvas, ctx)
+      if (wasm) {
+        wasm.setSitesRandomVel(animatedSites, seed)
+      }
+    }
 
     // WASM path: physics + compute handled by Rust engine
     if (wasmEnabledRef.current && wasmRef.current) {
@@ -1777,7 +1786,7 @@ export function ImageVoronoi() {
       frameCountRef.current = 0
       fpsUpdateTimeRef.current = fpsNow
     }
-  }, [usePixelRendering, getMaxHistoryFrames, ensureWebGL, speed, doublingTime, centroidPull, theta, sigma, setValues, drawSitesOverlay, applyDisplayOverlays])
+  }, [usePixelRendering, getMaxHistoryFrames, ensureWasm, ensureWebGL, speed, doublingTime, centroidPull, theta, sigma, setValues, drawSitesOverlay, applyDisplayOverlays])
 
   const animationStepRef = useRef(animationStep)
   animationStepRef.current = animationStep
@@ -1797,8 +1806,12 @@ export function ImageVoronoi() {
       setIsPlaying(false)
       setFps(0)
     } else {
-      // Start
-      initializeAnimation()
+      // Start (only re-initialize if no existing animation state)
+      const hasAnimState = animatedSitesRef.current.length > 0
+        && velocitiesRef.current.length === animatedSitesRef.current.length
+      if (!hasAnimState) {
+        initializeAnimation()
+      }
       fpsUpdateTimeRef.current = performance.now()
       lastFrameTimeRef.current = 0  // Reset for proper delta time on first frame
       frameCountRef.current = 0
