@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useMemo, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
-import { useUrlStates, intParam, boolParam, defStringParam, floatParam, Param } from 'use-prms/hash'
+import { useUrlStates, intParam, boolParam, defStringParam, stringParam, floatParam, Param } from 'use-prms/hash'
 import { useAction, useActions } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
@@ -337,6 +337,7 @@ export function ImageVoronoi() {
     si: floatParam({ default: 3, encoding: "string" }),     // O-U sigma: noise volatility (higher = more erratic)
     l: defStringParam("R"),  // display layers: R=regions, e=edges, s=sites, v=vectors
     embed: boolParam,          // embed mode: hide gallery + controls for clean screenshots
+    src: stringParam(),         // load image from URL on startup (for scrns/embed)
   })
 
   const seed = values.s
@@ -350,6 +351,7 @@ export function ImageVoronoi() {
   const theta = values.th
   const sigma = values.si
   const embed = values.embed
+  const srcUrl = values.src
 
   // Display layers derived from URL param `l`
   const layers = values.l
@@ -2495,6 +2497,26 @@ export function ImageVoronoi() {
       }
     },
   })
+
+  // Load image from `src` URL param on startup
+  const srcLoadedRef = useRef(false)
+  useEffect(() => {
+    if (!srcUrl || srcLoadedRef.current) return
+    srcLoadedRef.current = true
+
+    ;(async () => {
+      try {
+        const stored = await storeImageFromUrl(srcUrl, 'external')
+        setGalleryVersion(v => v + 1)
+        const blob = await getImageBlob(stored.id)
+        if (blob) {
+          handleSelectFromGallery(blob, stored.basename, stored.id)
+        }
+      } catch (e) {
+        console.warn('[src] Failed to load image from URL:', e)
+      }
+    })()
+  }, [srcUrl]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <>

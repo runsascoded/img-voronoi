@@ -10,6 +10,7 @@ import {
   deleteImage,
   isOPFSSupported,
 } from '../storage/ImageStorage'
+import { PicsumBrowser } from './PicsumBrowser'
 import './ImageGallery.css'
 
 const COLLAPSED_KEY = 'voronoi-gallery-collapsed'
@@ -282,6 +283,10 @@ export function ImageGallery({ onSelectImage, onNeighborIds, currentImageId, gal
               </div>
             </button>
           ))}
+          <PicsumBrowser
+            onSelectImage={onSelectImage}
+            onGalleryRefresh={refreshImages}
+          />
         </div>
       )}
     </div>
