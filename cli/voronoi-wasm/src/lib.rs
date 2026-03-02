@@ -262,6 +262,14 @@ impl VoronoiEngine {
             .collect()
     }
 
+    /// Set site velocities from flat [vx0,vy0, vx1,vy1, ...].
+    /// Lengths must match; extra or missing pairs are ignored/left unchanged.
+    pub fn set_velocities(&mut self, velocities: &[f64]) {
+        for (site, vel) in self.sites.sites.iter_mut().zip(velocities.chunks_exact(2)) {
+            site.vel = Velocity::new(vel[0], vel[1]);
+        }
+    }
+
     /// Get current site count.
     pub fn site_count(&self) -> usize {
         self.sites.len()

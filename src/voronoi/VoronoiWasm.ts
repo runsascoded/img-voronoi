@@ -149,6 +149,11 @@ export class VoronoiWasm {
     return flatToPositions(this.engine.get_velocities())
   }
 
+  /** Set site velocities from Position[]. */
+  setVelocities(velocities: Position[]): void {
+    this.engine.set_velocities(positionsToFlat(velocities))
+  }
+
   /** Get current site count. */
   siteCount(): number {
     return this.engine.site_count()

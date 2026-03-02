@@ -1282,17 +1282,22 @@ export function ImageVoronoi() {
     // Use the drawer's actual sites (not React state which might be stale)
     const currentSites = drawer.getSites()
     animatedSitesRef.current = currentSites.map(s => ({ ...s }))
-    // Create unit velocity vectors (random direction, magnitude 1)
-    velocitiesRef.current = currentSites.map(() => {
-      const angle = Math.random() * Math.PI * 2
-      return { x: Math.cos(angle), y: Math.sin(angle) }
-    })
 
-    // Initialize WASM engine with current sites if enabled
+    // Reuse existing velocities if they match site count (e.g. from vector toggle),
+    // otherwise generate fresh random unit vectors
+    if (velocitiesRef.current.length !== currentSites.length) {
+      velocitiesRef.current = currentSites.map(() => {
+        const angle = Math.random() * Math.PI * 2
+        return { x: Math.cos(angle), y: Math.sin(angle) }
+      })
+    }
+
+    // Initialize WASM engine with current sites + existing velocities
     if (wasmEnabledRef.current) {
       const wasm = ensureWasm(canvas, ctx)
       if (wasm) {
-        wasm.setSitesRandomVel(currentSites, seed)
+        wasm.setSites(currentSites, seed)
+        wasm.setVelocities(velocitiesRef.current)
       }
     }
 
@@ -1310,7 +1315,6 @@ export function ImageVoronoi() {
     // Draw velocity vectors (behind dots)
     if (showVectorsRef.current && velocities && velocities.length === sites.length) {
       const { width, height } = ctx.canvas
-      const colors = cellColorsRef.current
 
       // Dim regions so arrows read as foreground
       ctx.save()
@@ -1323,45 +1327,13 @@ export function ImageVoronoi() {
       const arrowWing = 5
       const arrowAngle = Math.PI / 6  // ±30° from shaft
       ctx.lineWidth = 2
+      ctx.strokeStyle = 'white'
+      ctx.fillStyle = 'white'
       for (let i = 0; i < sites.length; i++) {
         const site = sites[i]
         const vel = velocities[i]
         const tipX = site.x + vel.x * velocityScale
         const tipY = site.y + vel.y * velocityScale
-
-        // Arrow color: cell's hue at max brightness (pops against dimmed bg)
-        let color = 'rgb(255, 255, 255)'
-        if (colors && colors[i]) {
-          const [r, g, b] = colors[i]
-          // RGB → HSL, clamp L to ≥0.75, convert back
-          const rn = r / 255, gn = g / 255, bn = b / 255
-          const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn)
-          const d = max - min
-          let h = 0
-          if (d > 0) {
-            if (max === rn) h = ((gn - bn) / d + 6) % 6
-            else if (max === gn) h = (bn - rn) / d + 2
-            else h = (rn - gn) / d + 4
-            h /= 6
-          }
-          const s = d === 0 ? 0 : d / (1 - Math.abs(max + min - 1))
-          const l = Math.max((max + min) / 2, 0.75)
-          // HSL → RGB
-          const c = (1 - Math.abs(2 * l - 1)) * s
-          const x = c * (1 - Math.abs((h * 6) % 2 - 1))
-          const m = l - c / 2
-          let r1: number, g1: number, b1: number
-          const sector = h * 6
-          if (sector < 1) { r1 = c; g1 = x; b1 = 0 }
-          else if (sector < 2) { r1 = x; g1 = c; b1 = 0 }
-          else if (sector < 3) { r1 = 0; g1 = c; b1 = x }
-          else if (sector < 4) { r1 = 0; g1 = x; b1 = c }
-          else if (sector < 5) { r1 = x; g1 = 0; b1 = c }
-          else { r1 = c; g1 = 0; b1 = x }
-          color = `rgb(${Math.round((r1 + m) * 255)}, ${Math.round((g1 + m) * 255)}, ${Math.round((b1 + m) * 255)})`
-        }
-        ctx.strokeStyle = color
-        ctx.fillStyle = color
 
         // Draw shaft
         ctx.beginPath()
@@ -1512,7 +1484,8 @@ export function ImageVoronoi() {
     if (wasmEnabledRef.current && !wasmRef.current) {
       const wasm = ensureWasm(canvas, ctx)
       if (wasm) {
-        wasm.setSitesRandomVel(animatedSites, seed)
+        wasm.setSites(animatedSites, seed)
+        wasm.setVelocities(velocities)
       }
     }
 
