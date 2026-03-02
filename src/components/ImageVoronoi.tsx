@@ -547,14 +547,16 @@ export function ImageVoronoi() {
   }, [])
 
   // Helper to ensure WASM engine is initialized with current image
-  const ensureWasm = useCallback((canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D): VoronoiWasm | null => {
+  // Uses originalImgDataRef (not canvas pixels) to avoid capturing Voronoi overlays as the source image
+  const ensureWasm = useCallback((canvas: HTMLCanvasElement, _ctx: CanvasRenderingContext2D): VoronoiWasm | null => {
     if (!wasmReady) return null
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+    const origImg = originalImgDataRef.current
+    if (!origImg) return null
     if (!wasmRef.current) {
-      wasmRef.current = new VoronoiWasm(imgData.data, canvas.width, canvas.height, seed)
+      wasmRef.current = new VoronoiWasm(origImg.data, canvas.width, canvas.height, seed)
       console.log(`[WASM] engine created ${canvas.width}x${canvas.height}`)
     } else {
-      wasmRef.current.setImage(imgData.data, canvas.width, canvas.height)
+      wasmRef.current.setImage(origImg.data, canvas.width, canvas.height)
     }
     return wasmRef.current
   }, [wasmReady, seed])
