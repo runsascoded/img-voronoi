@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback, useMemo, ChangeEvent, DragEvent, useState, MouseEvent } from 'react'
 import useSessionStorageState from 'use-session-storage-state'
-import { useUrlStates, intParam, boolParam, floatParam, Param } from 'use-prms/hash'
+import { useUrlStates, intParam, boolParam, defStringParam, floatParam, Param } from 'use-prms/hash'
 import { useAction, useActions } from 'use-kbd'
 import { saveAs } from 'file-saver'
 import { VoronoiDrawer, Position, DistanceMetric } from '../voronoi/VoronoiDrawer'
@@ -276,16 +276,10 @@ export function ImageVoronoi() {
   const cellCentroidsRef = useRef<Position[] | null>(null)
   const farthestPointRef = useRef<Position | null>(null)
 
-  // Site visualization
-  const [showSites, setShowSites] = useState(false)
+  // Display layer refs (synced from URL param below)
   const showSitesRef = useRef(false)
-  const [showVectors, setShowVectors] = useState(false)
   const showVectorsRef = useRef(false)
-
-  // Display toggles
-  const [showRegions, setShowRegions] = useState(true)
   const showRegionsRef = useRef(true)
-  const [showEdges, setShowEdges] = useState(false)
   const showEdgesRef = useRef(false)
 
   // Image metadata
@@ -341,6 +335,7 @@ export function ImageVoronoi() {
     cp: floatParam({ default: 2, encoding: "string" }),     // centroid pull strength (for WASM physics)
     th: floatParam({ default: 3, encoding: "string" }),     // O-U theta: mean reversion (higher = straighter paths)
     si: floatParam({ default: 3, encoding: "string" }),     // O-U sigma: noise volatility (higher = more erratic)
+    l: defStringParam("R"),  // display layers: R=regions, e=edges, s=sites, v=vectors
   })
 
   const seed = values.s
@@ -353,6 +348,13 @@ export function ImageVoronoi() {
   const centroidPull = values.cp
   const theta = values.th
   const sigma = values.si
+
+  // Display layers derived from URL param `l`
+  const layers = values.l
+  const showRegions = layers.includes('R')
+  const showEdges = layers.includes('e')
+  const showSites = layers.includes('s')
+  const showVectors = layers.includes('v')
 
   // Gradual growth state (for smooth site count changes)
   const targetSitesRef = useRef<number>(numSites)  // Target we're growing/shrinking toward
@@ -462,19 +464,10 @@ export function ImageVoronoi() {
 
   useEffect(() => {
     showSitesRef.current = showSites
-  }, [showSites])
-
-  useEffect(() => {
     showVectorsRef.current = showVectors
-  }, [showVectors])
-
-  useEffect(() => {
     showRegionsRef.current = showRegions
-  }, [showRegions])
-
-  useEffect(() => {
     showEdgesRef.current = showEdges
-  }, [showEdges])
+  }, [showSites, showVectors, showRegions, showEdges])
 
   // Sync targetSitesRef when numSites changes from slider or other direct updates
   useEffect(() => {
@@ -2133,48 +2126,38 @@ export function ImageVoronoi() {
     handler: triggerUpload,
   })
 
-  const toggleEdges = useCallback(() => {
-    setShowEdges(prev => !prev)
-  }, [])
+  const toggleLayer = useCallback((char: string) => {
+    const cur = values.l
+    const next = cur.includes(char) ? cur.replace(char, '') : cur + char
+    setValues({ l: next })
+  }, [values.l, setValues])
 
   useAction('voronoi:toggle-edges', {
     label: 'Toggle edge overlay',
     group: 'Voronoi',
     defaultBindings: ['e'],
-    handler: toggleEdges,
+    handler: useCallback(() => toggleLayer('e'), [toggleLayer]),
   })
-
-  const toggleRegions = useCallback(() => {
-    setShowRegions(prev => !prev)
-  }, [])
 
   useAction('voronoi:toggle-regions', {
     label: 'Toggle Voronoi regions',
     group: 'Voronoi',
     defaultBindings: ['r'],
-    handler: toggleRegions,
+    handler: useCallback(() => toggleLayer('R'), [toggleLayer]),
   })
-
-  const toggleSites = useCallback(() => {
-    setShowSites(prev => !prev)
-  }, [])
 
   useAction('voronoi:toggle-sites', {
     label: 'Toggle site markers',
     group: 'Voronoi',
     defaultBindings: ['p'],
-    handler: toggleSites,
+    handler: useCallback(() => toggleLayer('s'), [toggleLayer]),
   })
-
-  const toggleVectors = useCallback(() => {
-    setShowVectors(prev => !prev)
-  }, [])
 
   useAction('voronoi:toggle-vectors', {
     label: 'Toggle velocity vectors',
     group: 'Voronoi',
     defaultBindings: ['v'],
-    handler: toggleVectors,
+    handler: useCallback(() => toggleLayer('v'), [toggleLayer]),
   })
 
   const focusFilenameInput = useCallback(() => {
@@ -2578,10 +2561,10 @@ export function ImageVoronoi() {
         showEdges={showEdges}
         showSites={showSites}
         showVectors={showVectors}
-        onToggleRegions={() => setShowRegions(!showRegions)}
-        onToggleEdges={() => setShowEdges(!showEdges)}
-        onToggleSites={() => setShowSites(!showSites)}
-        onToggleVectors={() => setShowVectors(!showVectors)}
+        onToggleRegions={() => toggleLayer('R')}
+        onToggleEdges={() => toggleLayer('e')}
+        onToggleSites={() => toggleLayer('s')}
+        onToggleVectors={() => toggleLayer('v')}
         imageDimensions={imageDimensions}
         imageFilename={imageFilename}
         imageScale={imageScale}
