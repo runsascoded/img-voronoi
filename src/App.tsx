@@ -14,6 +14,8 @@ const GitHubIcon = () => (
   </svg>
 )
 
+const embed = new URLSearchParams(window.location.hash.replace(/^#/, '')).has('embed')
+
 function App() {
   const actions = [
     {
@@ -27,11 +29,13 @@ function App() {
   return (
     <HotkeysProvider>
       <ImageVoronoi />
-      <ShortcutsModal groupRenderers={GROUP_RENDERERS} groupOrder={GROUP_ORDER} />
-      <Omnibar />
-      <LookupModal />
-      <SequenceModal />
-      <SpeedDial actions={actions} />
+      {!embed && <>
+        <ShortcutsModal groupRenderers={GROUP_RENDERERS} groupOrder={GROUP_ORDER} />
+        <Omnibar />
+        <LookupModal />
+        <SequenceModal />
+        <SpeedDial actions={actions} />
+      </>}
     </HotkeysProvider>
   )
 }

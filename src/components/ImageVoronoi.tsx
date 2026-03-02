@@ -336,6 +336,7 @@ export function ImageVoronoi() {
     th: floatParam({ default: 3, encoding: "string" }),     // O-U theta: mean reversion (higher = straighter paths)
     si: floatParam({ default: 3, encoding: "string" }),     // O-U sigma: noise volatility (higher = more erratic)
     l: defStringParam("R"),  // display layers: R=regions, e=edges, s=sites, v=vectors
+    embed: boolParam,          // embed mode: hide gallery + controls for clean screenshots
   })
 
   const seed = values.s
@@ -348,6 +349,7 @@ export function ImageVoronoi() {
   const centroidPull = values.cp
   const theta = values.th
   const sigma = values.si
+  const embed = values.embed
 
   // Display layers derived from URL param `l`
   const layers = values.l
@@ -2496,14 +2498,14 @@ export function ImageVoronoi() {
 
   return (
     <>
-      <ImageGallery
+      {!embed && <ImageGallery
         onSelectImage={handleSelectFromGallery}
         onNeighborIds={handleNeighborIds}
         currentImageId={currentImageId}
         galleryVersion={galleryVersion}
-      />
+      />}
       <div
-        className={`IV${isDragging ? ' dragging' : ''}`}
+        className={`IV${isDragging ? ' dragging' : ''}${embed ? ' embed' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
@@ -2528,7 +2530,7 @@ export function ImageVoronoi() {
         />
       </div>
     </div>
-      <ControlPanel
+      {!embed && <ControlPanel
         collapsed={controlsCollapsed}
         onToggleCollapse={toggleControlsCollapsed}
         isPlaying={isPlaying}
@@ -2593,7 +2595,7 @@ export function ImageVoronoi() {
         onDownloadFormatChange={setDownloadFormat}
         onFileChange={handleFileChange}
         onDownload={handleDownload}
-      />
+      />}
     </>
   )
 }
