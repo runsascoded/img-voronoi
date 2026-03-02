@@ -1410,6 +1410,13 @@ export function ImageVoronoi() {
         const ctx = canvas.getContext('2d')
         if (ctx) {
           const currentSites = animatedSitesRef.current.length > 0 ? animatedSitesRef.current : drawer.getSites()
+          // Generate velocities on demand if vectors are shown but none exist yet
+          if (showVectors && velocitiesRef.current.length !== currentSites.length) {
+            velocitiesRef.current = currentSites.map(() => {
+              const angle = Math.random() * Math.PI * 2
+              return { x: Math.cos(angle), y: Math.sin(angle) }
+            })
+          }
           ctx.putImageData(originalImgData, 0, 0)
           if (pixelRenderingRef.current) {
             drawer.drawFromCellData(cellOfRef.current!, cellColorsRef.current!, currentSites)
