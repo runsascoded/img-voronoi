@@ -9,14 +9,15 @@ Interactive Voronoi diagram visualization from images, with animated site physic
 - **Voronoi from images**: brightness-weighted site sampling, CPU flood-fill and WebGL cone rendering
 - **WASM backend**: Rust-compiled Voronoi compute with O-U physics (centroid pull, drift, wander)
 - **Animation**: play/pause/step with configurable speed, doubling time for gradual site growth
-- **Image gallery**: always-visible collapsible sidebar, OPFS storage with thumbnails, auto-seeds sample images on first visit
+- **Image gallery**: always-visible collapsible sidebar, OPFS storage with thumbnails, auto-seeds sample images on first visit, built-in [Picsum] photo browser
+- **Shareable URLs**: all settings stored as URL hash params; `src` param loads any image by URL, `embed` param hides UI for clean embeds
 - **CLI video rendering**: Rust CLI with phase specs (grow, hold, fade), ffmpeg encoding, GPU compute shader backend
 
 ## Quick Start
 
 ```sh
 pnpm install
-pnpm dev        # http://localhost:5184
+pnpm dev        # http://localhost:8076
 ```
 
 ### CLI
@@ -34,3 +35,4 @@ Press `?` to open the omnibar (via [use-kbd]) showing all available shortcuts.
 [demo]: https://voro.rbw.sh
 [txstc55/ImageVoronoi]: https://github.com/txstc55/ImageVoronoi
 [use-kbd]: https://github.com/runsascoded/use-kbd
+[Picsum]: https://picsum.photos

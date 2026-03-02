@@ -9,10 +9,12 @@ src/                          # Web app (React/TS/Vite)
   components/
     ImageVoronoi.tsx          # Main UI: canvas, controls, animation, image loading
     ImageGallery.tsx           # Always-visible collapsible image gallery
+    PicsumBrowser.tsx          # Lorem Picsum thumbnail grid browser
   voronoi/
     VoronoiDrawer.ts          # CPU Voronoi (bucket-queue flood fill)
     VoronoiWebGL.ts           # WebGL acceleration (cone rendering)
     ChoosePoints.ts           # Brightness-weighted site sampling
+  external/picsum.ts          # Picsum API client (list, thumb URLs, image URLs)
   storage/ImageStorage.ts     # OPFS image persistence
   utils/random.ts             # Mulberry32 seeded PRNG
 
@@ -28,12 +30,12 @@ cli/                          # Rust CLI
 
 ## Web App
 
-- Dev server: port **5184** (`pnpm dev`)
+- Dev server: port **8076** (`pnpm dev`)
 - Deployed to **[voro.rbw.sh]** via GitHub Pages (GHA builds WASM + Vite)
-- URL params via `use-prms/hash`: `s` (seed), `n` (sites), `i` (inverse), `v` (speed), `g` (WebGL), `d` (doubling time), `w` (WASM), `cp` (centroid pull), `th` (O-U theta), `si` (O-U sigma)
+- URL params via `use-prms/hash`: `s` (seed), `n` (sites), `i` (inverse), `v` (speed), `g` (WebGL), `d` (doubling time), `w` (WASM), `cp` (centroid pull), `th` (O-U theta), `si` (O-U sigma), `embed` (hide UI), `src` (load image from URL)
 - Keyboard shortcuts via `use-kbd`
 - MUI Tooltips throughout
-- Gallery sidebar (always visible, collapsible): OPFS-backed image storage with thumbnails, auto-seeds `sample.jpg`/`sample2.jpg` on first visit
+- Gallery sidebar (always visible, collapsible): OPFS-backed image storage with thumbnails, auto-seeds `sample.jpg`/`sample2.jpg` on first visit, Picsum photo browser for loading external images
 
 [voro.rbw.sh]: https://voro.rbw.sh
 
